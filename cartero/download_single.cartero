@@ -1,0 +1,17 @@
+version = 1
+url = "http://pandorica.local:8080/api/download_single"
+method = "POST"
+
+[body]
+type = "raw"
+format = "json"
+body = '''
+{
+  "url": "https://www.youtube.com/watch?v=EyjtdCdtGs0"
+}'''
+
+[headers]
+
+[variables]
+
+[inactive-params]

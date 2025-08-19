@@ -1,0 +1,9 @@
+version = 1
+url = "http://pandorica.local:8080/api/status?id=d70608afaebc2b7ca71028cf"
+method = "GET"
+
+[headers]
+
+[variables]
+
+[inactive-params]
