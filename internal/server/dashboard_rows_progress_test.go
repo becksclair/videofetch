@@ -11,11 +11,11 @@ import (
 
 // fakeMgr allows dynamic progress via a captured variable
 type fakeMgr struct {
-    prog *float64
+	prog *float64
 }
 
-func (f *fakeMgr) Enqueue(url string) (string, error) { return "id-1", nil }
-func (f *fakeMgr) AttachDB(id string, dbID int64)      {}
+func (f *fakeMgr) Enqueue(url string) (string, error)                            { return "id-1", nil }
+func (f *fakeMgr) AttachDB(id string, dbID int64)                                {}
 func (f *fakeMgr) SetMeta(id string, title string, duration int64, thumb string) {}
 func (f *fakeMgr) Snapshot(id string) []*download.Item {
 	p := 0.0
@@ -31,7 +31,7 @@ func (f *fakeMgr) Snapshot(id string) []*download.Item {
 
 func TestDashboardRows_ProgressIncrements(t *testing.T) {
 	prog := 1.0
-h := New(&fakeMgr{prog: &prog}, nil)
+	h := New(&fakeMgr{prog: &prog}, nil)
 
 	// First call: ~1%
 	req1 := httptest.NewRequest(http.MethodGet, "/dashboard/rows", nil)

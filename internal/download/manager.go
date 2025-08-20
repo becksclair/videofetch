@@ -35,19 +35,19 @@ const (
 const defaultYTDLPFormat = "bestvideo*+bestaudio/best"
 
 type Item struct {
-    ID       string  `json:"id"`
-    URL      string  `json:"url"`
-    Progress float64 `json:"progress"` // 0-100
-    State    State   `json:"state"`
-    Error    string  `json:"error,omitempty"`
+	ID       string  `json:"id"`
+	URL      string  `json:"url"`
+	Progress float64 `json:"progress"` // 0-100
+	State    State   `json:"state"`
+	Error    string  `json:"error,omitempty"`
 
-    // Optional metadata for UI convenience.
-    Title        string `json:"title,omitempty"`
-    Duration     int64  `json:"duration,omitempty"`       // seconds
-    ThumbnailURL string `json:"thumbnail_url,omitempty"`
+	// Optional metadata for UI convenience.
+	Title        string `json:"title,omitempty"`
+	Duration     int64  `json:"duration,omitempty"` // seconds
+	ThumbnailURL string `json:"thumbnail_url,omitempty"`
 
-    // Optional database binding for persistence updates.
-    DBID int64 `json:"db_id,omitempty"`
+	// Optional database binding for persistence updates.
+	DBID int64 `json:"db_id,omitempty"`
 
 	startedAt time.Time
 	updatedAt time.Time
@@ -59,7 +59,7 @@ type job struct {
 }
 
 type Manager struct {
-    outDir string
+	outDir string
 
 	jobs    chan job
 	wg      sync.WaitGroup
@@ -74,9 +74,9 @@ type Manager struct {
 
 	// optional yt-dlp impersonation client (passed as --impersonate). If empty,
 	// falls back to env var VIDEOFETCH_YTDLP_IMPERSONATE; if still empty, not set.
-    ytdlpImpersonate string
+	ytdlpImpersonate string
 
-    hooks Hooks
+	hooks Hooks
 }
 
 // NewManager creates a download manager with a worker pool and a bounded queue.
@@ -86,9 +86,9 @@ func NewManager(outputDir string, workers, queueCap int) *Manager {
 
 // ManagerOptions configures yt-dlp invocation behavior.
 type ManagerOptions struct {
-    Format      string
-    Impersonate string
-    Hooks       Hooks
+	Format      string
+	Impersonate string
+	Hooks       Hooks
 }
 
 // NewManagerWithFormat is like NewManager but allows specifying a yt-dlp format selector.
@@ -104,14 +104,14 @@ func NewManagerWithOptions(outputDir string, workers, queueCap int, opts Manager
 	if queueCap <= 0 {
 		queueCap = 64
 	}
-    m := &Manager{
-        outDir:           outputDir,
-        jobs:             make(chan job, queueCap),
-        downloads:        make(map[string]*Item, queueCap*2),
-        ytdlpFormat:      opts.Format,
-        ytdlpImpersonate: opts.Impersonate,
-        hooks:            opts.Hooks,
-    }
+	m := &Manager{
+		outDir:           outputDir,
+		jobs:             make(chan job, queueCap),
+		downloads:        make(map[string]*Item, queueCap*2),
+		ytdlpFormat:      opts.Format,
+		ytdlpImpersonate: opts.Impersonate,
+		hooks:            opts.Hooks,
+	}
 	for i := 0; i < workers; i++ {
 		m.wg.Add(1)
 		go m.worker(i)
@@ -139,7 +139,7 @@ func (m *Manager) Enqueue(url string) (string, error) {
 		return "", errors.New("shutting_down")
 	}
 	id := genID()
-    it := &Item{ID: id, URL: url, Progress: 0, State: StateQueued, startedAt: time.Now(), updatedAt: time.Now()}
+	it := &Item{ID: id, URL: url, Progress: 0, State: StateQueued, startedAt: time.Now(), updatedAt: time.Now()}
 	m.mu.Lock()
 	m.downloads[id] = it
 	m.mu.Unlock()
@@ -159,29 +159,29 @@ func (m *Manager) Enqueue(url string) (string, error) {
 
 // AttachDB binds a database row ID to the in-memory item for persistence updates.
 func (m *Manager) AttachDB(id string, dbID int64) {
-    m.mu.Lock()
-    if it, ok := m.downloads[id]; ok {
-        it.DBID = dbID
-    }
-    m.mu.Unlock()
+	m.mu.Lock()
+	if it, ok := m.downloads[id]; ok {
+		it.DBID = dbID
+	}
+	m.mu.Unlock()
 }
 
 // SetMeta updates the in-memory item with extracted metadata for UI.
 func (m *Manager) SetMeta(id string, title string, duration int64, thumb string) {
-    m.mu.Lock()
-    if it, ok := m.downloads[id]; ok {
-        if title != "" {
-            it.Title = title
-        }
-        if duration > 0 {
-            it.Duration = duration
-        }
-        if thumb != "" {
-            it.ThumbnailURL = thumb
-        }
-        it.updatedAt = time.Now()
-    }
-    m.mu.Unlock()
+	m.mu.Lock()
+	if it, ok := m.downloads[id]; ok {
+		if title != "" {
+			it.Title = title
+		}
+		if duration > 0 {
+			it.Duration = duration
+		}
+		if thumb != "" {
+			it.ThumbnailURL = thumb
+		}
+		it.updatedAt = time.Now()
+	}
+	m.mu.Unlock()
 }
 
 // Snapshot returns a copy of the current download items. If id is non-empty, returns at most that item.
@@ -244,19 +244,19 @@ func (m *Manager) runYTDLP(id, url string) error {
 	// Output template
 	outTpl := filepath.Join(m.outDir, "%(title)s-%(id)s.%(ext)s")
 
-    // Helper to run yt-dlp once with given options
-    runOnce := func(format, impersonate string) error {
-        // Align with the Rust example: use a simple, parseable progress template
-        // that emits to stdout lines beginning with "remedia-" and include
-        // downloaded/total/estimate/eta. Also embed metadata/thumbnail/chapters
-        // and continue partially downloaded files.
-        args := []string{
-            "--newline", "--no-color", "--no-playlist",
-            "--progress-template", "download:remedia-%(progress.downloaded_bytes)s-%(progress.total_bytes)s-%(progress.total_bytes_estimate)s-%(progress.eta)s",
-            "--continue",
-            "--embed-thumbnail", "--embed-metadata", "--embed-chapters", "--windows-filenames",
-            "-o", outTpl, url,
-        }
+	// Helper to run yt-dlp once with given options
+	runOnce := func(format, impersonate string) error {
+		// Align with the Rust example: use a simple, parseable progress template
+		// that emits to stdout lines beginning with "remedia-" and include
+		// downloaded/total/estimate/eta. Also embed metadata/thumbnail/chapters
+		// and continue partially downloaded files.
+		args := []string{
+			"--newline", "--no-color", "--no-playlist",
+			"--progress-template", "download:remedia-%(progress.downloaded_bytes)s-%(progress.total_bytes)s-%(progress.total_bytes_estimate)s-%(progress.eta)s",
+			"--continue",
+			"--embed-thumbnail", "--embed-metadata", "--embed-chapters", "--windows-filenames",
+			"-o", outTpl, url,
+		}
 		if format != "" {
 			base := []string{"-f", format}
 			if len(args) >= 3 {
@@ -271,15 +271,15 @@ func (m *Manager) runYTDLP(id, url string) error {
 		cmd := exec.Command("yt-dlp", args...)
 
 		// Progress appears on stderr; capture both to be safe and tee into buffers for diagnostics.
-        stderr, err := cmd.StderrPipe()
-        if err != nil {
-            return fmt.Errorf("stderr: %w", err)
-        }
-        stdout, err := cmd.StdoutPipe()
-        if err != nil {
-            return fmt.Errorf("stdout: %w", err)
-        }
-        var stderrBuf, stdoutBuf bytes.Buffer
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return fmt.Errorf("stderr: %w", err)
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return fmt.Errorf("stdout: %w", err)
+		}
+		var stderrBuf, stdoutBuf bytes.Buffer
 
 		if err := cmd.Start(); err != nil {
 			return fmt.Errorf("start: %w", err)
@@ -288,14 +288,14 @@ func (m *Manager) runYTDLP(id, url string) error {
 		// Read progress concurrently.
 		var wg sync.WaitGroup
 		wg.Add(2)
-        go func() {
-            defer wg.Done()
-            m.parseProgress(id, bufio.NewScanner(io.TeeReader(stderr, &stderrBuf)))
-        }()
-        go func() {
-            defer wg.Done()
-            m.parseProgress(id, bufio.NewScanner(io.TeeReader(stdout, &stdoutBuf)))
-        }()
+		go func() {
+			defer wg.Done()
+			m.parseProgress(id, bufio.NewScanner(io.TeeReader(stderr, &stderrBuf)))
+		}()
+		go func() {
+			defer wg.Done()
+			m.parseProgress(id, bufio.NewScanner(io.TeeReader(stdout, &stdoutBuf)))
+		}()
 		wg.Wait()
 
 		if err := cmd.Wait(); err != nil {
@@ -322,6 +322,7 @@ func (m *Manager) runYTDLP(id, url string) error {
 		imp = os.Getenv("VIDEOFETCH_YTDLP_IMPERSONATE")
 	}
 
+	log.Printf("yt-dlp start id=%s url=%s format=%q impersonate=%q output=%s", id, url, format, imp, outTpl)
 	if err := runOnce(format, imp); err != nil {
 		emsg := err.Error()
 		if shouldFallback(emsg) {
@@ -344,6 +345,7 @@ func (m *Manager) runYTDLP(id, url string) error {
 					if strings.Contains(lower, "impersonate target") {
 						log.Printf("impersonation %q unavailable; retrying fallback without impersonation", fbImp)
 						if err3 := runOnce(ff, ""); err3 == nil {
+							log.Printf("yt-dlp success id=%s format=%q impersonate=%q (fallback no-imp)", id, ff, "")
 							return nil
 						} else {
 							// continue to next fallback
@@ -361,6 +363,7 @@ func (m *Manager) runYTDLP(id, url string) error {
 					// For other errors, abort early
 					return err2
 				} else {
+					log.Printf("yt-dlp success id=%s format=%q impersonate=%q (fallback)", id, ff, fbImp)
 					return nil
 				}
 			}
@@ -369,96 +372,97 @@ func (m *Manager) runYTDLP(id, url string) error {
 		}
 		return err
 	}
+	log.Printf("yt-dlp success id=%s url=%s format=%q impersonate=%q", id, url, format, imp)
 	return nil
 }
 
 func (m *Manager) parseProgress(id string, sc *bufio.Scanner) {
-    // Increase buffer to handle long lines
-    buf := make([]byte, 0, 64*1024)
-    sc.Buffer(buf, 1024*1024)
-    // Split on either \n, \r\n, or bare \r since yt-dlp often rewrites
-    // progress on the same line using carriage returns.
-    sc.Split(scanCRorLF)
-    for sc.Scan() {
-        line := strings.TrimSpace(sc.Text())
-        if line == "" {
-            continue
-        }
-        // Only handle lines from our progress template. Rust example uses
-        // prefix "remedia-<downloaded>-<total>-<estimate>-<eta>".
-        if !strings.HasPrefix(line, "remedia-") {
-            continue
-        }
-        parts := strings.Split(line, "-")
-        if len(parts) < 5 {
-            continue
-        }
-        // parts[0] = "remedia"
-        downloaded := parseFloat64(parts[1])
-        total := parseFloat64(parts[2])
-        estimate := parseFloat64(parts[3])
-        // parts[4] is eta; unused for now
-        tBytes := total
-        if tBytes <= 0 && estimate > 0 {
-            tBytes = estimate
-        }
-        if tBytes > 0 && downloaded >= 0 {
-            p := downloaded / tBytes * 100.0
-            if p >= 100 {
-                p = 99
-            }
-            if p >= 0 {
-                m.updateProgress(id, p)
-            }
-        }
-    }
-    if err := sc.Err(); err != nil {
-        log.Printf("progress scan error for %s: %v", id, err)
-    }
+	// Increase buffer to handle long lines
+	buf := make([]byte, 0, 64*1024)
+	sc.Buffer(buf, 1024*1024)
+	// Split on either \n, \r\n, or bare \r since yt-dlp often rewrites
+	// progress on the same line using carriage returns.
+	sc.Split(scanCRorLF)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		// Only handle lines from our progress template. Rust example uses
+		// prefix "remedia-<downloaded>-<total>-<estimate>-<eta>".
+		if !strings.HasPrefix(line, "remedia-") {
+			continue
+		}
+		parts := strings.Split(line, "-")
+		if len(parts) < 5 {
+			continue
+		}
+		// parts[0] = "remedia"
+		downloaded := parseFloat64(parts[1])
+		total := parseFloat64(parts[2])
+		estimate := parseFloat64(parts[3])
+		// parts[4] is eta; unused for now
+		tBytes := total
+		if tBytes <= 0 && estimate > 0 {
+			tBytes = estimate
+		}
+		if tBytes > 0 && downloaded >= 0 {
+			p := downloaded / tBytes * 100.0
+			if p >= 100 {
+				p = 99
+			}
+			if p >= 0 {
+				m.updateProgress(id, p)
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		log.Printf("progress scan error for %s: %v", id, err)
+	}
 }
 
 // parseFloat64 parses a simple decimal number, returning -1 on error.
 func parseFloat64(s string) float64 {
-    s = strings.TrimSpace(s)
-    if s == "" {
-        return -1
-    }
-    // Avoid introducing strconv allocations; manual parse is fine here.
-    var whole int64
-    var frac int64
-    var fracPow float64 = 1
-    neg := false
-    i := 0
-    if s[0] == '-' {
-        neg = true
-        i = 1
-    }
-    dotSeen := false
-    for ; i < len(s); i++ {
-        c := s[i]
-        if c == '.' && !dotSeen {
-            dotSeen = true
-            continue
-        }
-        if c < '0' || c > '9' {
-            return -1
-        }
-        d := int64(c - '0')
-        if !dotSeen {
-            whole = whole*10 + d
-        } else {
-            frac = frac*10 + d
-            fracPow *= 10
-        }
-    }
-    val := float64(whole)
-    if fracPow > 1 {
-        val += float64(frac) / fracPow
-    }
-    if neg {
-        val = -val
-    }
-    return val
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return -1
+	}
+	// Avoid introducing strconv allocations; manual parse is fine here.
+	var whole int64
+	var frac int64
+	var fracPow float64 = 1
+	neg := false
+	i := 0
+	if s[0] == '-' {
+		neg = true
+		i = 1
+	}
+	dotSeen := false
+	for ; i < len(s); i++ {
+		c := s[i]
+		if c == '.' && !dotSeen {
+			dotSeen = true
+			continue
+		}
+		if c < '0' || c > '9' {
+			return -1
+		}
+		d := int64(c - '0')
+		if !dotSeen {
+			whole = whole*10 + d
+		} else {
+			frac = frac*10 + d
+			fracPow *= 10
+		}
+	}
+	val := float64(whole)
+	if fracPow > 1 {
+		val += float64(frac) / fracPow
+	}
+	if neg {
+		val = -val
+	}
+	return val
 }
 
 // scanCRorLF is like bufio.ScanLines but treats a bare '\r' as a line
@@ -532,36 +536,42 @@ func parsePercent(s string) float64 {
 }
 
 func (m *Manager) updateProgress(id string, p float64) {
-    m.mu.Lock()
-    if it, ok := m.downloads[id]; ok {
-        // only increase progress (yt-dlp prints for multiple phases)
-        if p > it.Progress {
-            it.Progress = p
-            it.updatedAt = time.Now()
-            if it.DBID > 0 && m.hooks != nil {
-                dbid := it.DBID
-                prog := it.Progress
-                go m.hooks.OnProgress(dbid, prog)
-            }
-        }
-    }
-    m.mu.Unlock()
+	m.mu.Lock()
+	if it, ok := m.downloads[id]; ok {
+		// only increase progress (yt-dlp prints for multiple phases)
+		if p > it.Progress {
+			prev := it.Progress
+			it.Progress = p
+			it.updatedAt = time.Now()
+			// Log when integer percentage advances to reduce noise
+			if int(p) != int(prev) {
+				log.Printf("yt-dlp progress id=%s url=%s progress=%d%%", id, it.URL, int(p))
+			}
+			if it.DBID > 0 && m.hooks != nil {
+				dbid := it.DBID
+				prog := it.Progress
+				go m.hooks.OnProgress(dbid, prog)
+			}
+		}
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) updateState(id string, st State, errMsg string) {
-    m.mu.Lock()
-    if it, ok := m.downloads[id]; ok {
-        it.State = st
-        it.Error = errMsg
-        it.updatedAt = time.Now()
-        if it.DBID > 0 && m.hooks != nil {
-            dbid := it.DBID
-            state := st
-            errStr := errMsg
-            go m.hooks.OnStateChange(dbid, state, errStr)
-        }
-    }
-    m.mu.Unlock()
+	m.mu.Lock()
+	if it, ok := m.downloads[id]; ok {
+		it.State = st
+		it.Error = errMsg
+		it.updatedAt = time.Now()
+		log.Printf("download state id=%s url=%s state=%s", id, it.URL, st)
+		if it.DBID > 0 && m.hooks != nil {
+			dbid := it.DBID
+			state := st
+			errStr := errMsg
+			go m.hooks.OnStateChange(dbid, state, errStr)
+		}
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) updateFailure(id string, err error) {

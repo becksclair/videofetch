@@ -1,20 +1,20 @@
 package server
 
 import (
-    "net/http"
-    "net/http/httptest"
-    "strings"
-    "testing"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
 
-    "videofetch/internal/download"
+	"videofetch/internal/download"
 )
 
 func TestDashboard_HTML_OK(t *testing.T) {
 	items := []*download.Item{{ID: "abcdef012345", URL: "https://x", Progress: 10, State: download.StateQueued}}
-h := New(&mockMgr{
-	enqueueFn:  func(url string) (string, error) { return "", nil },
-	snapshotFn: func(id string) []*download.Item { return items },
-}, nil)
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return items },
+	}, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
 	req.Header.Set("X-Forwarded-For", "198.51.100.1")
 	w := httptest.NewRecorder()
@@ -33,10 +33,10 @@ h := New(&mockMgr{
 
 func TestDashboard_Rows_OK(t *testing.T) {
 	items := []*download.Item{{ID: "id1", URL: "https://example.com/a", Progress: 42, State: download.StateDownloading}}
-h := New(&mockMgr{
-	enqueueFn:  func(url string) (string, error) { return "", nil },
-	snapshotFn: func(id string) []*download.Item { return items },
-}, nil)
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return items },
+	}, nil)
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/rows", nil)
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
 	w := httptest.NewRecorder()
@@ -51,10 +51,10 @@ h := New(&mockMgr{
 
 func TestDashboard_Enqueue_OK_And_Invalid(t *testing.T) {
 	called := 0
-h := New(&mockMgr{
-	enqueueFn:  func(url string) (string, error) { called++; return "newid", nil },
-	snapshotFn: func(id string) []*download.Item { return nil },
-}, nil)
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { called++; return "newid", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, nil)
 	// Valid submission
 	req := httptest.NewRequest(http.MethodPost, "/dashboard/enqueue", strings.NewReader("url=https%3A%2F%2Fok"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -81,11 +81,11 @@ h := New(&mockMgr{
 
 // mock manager implementing downloadManager for dashboard tests
 type mockMgr struct {
-    enqueueFn  func(url string) (string, error)
-    snapshotFn func(id string) []*download.Item
+	enqueueFn  func(url string) (string, error)
+	snapshotFn func(id string) []*download.Item
 }
 
-func (m *mockMgr) Enqueue(url string) (string, error)  { return m.enqueueFn(url) }
-func (m *mockMgr) Snapshot(id string) []*download.Item { return m.snapshotFn(id) }
-func (m *mockMgr) AttachDB(id string, dbID int64)      {}
+func (m *mockMgr) Enqueue(url string) (string, error)                            { return m.enqueueFn(url) }
+func (m *mockMgr) Snapshot(id string) []*download.Item                           { return m.snapshotFn(id) }
+func (m *mockMgr) AttachDB(id string, dbID int64)                                {}
 func (m *mockMgr) SetMeta(id string, title string, duration int64, thumb string) {}

@@ -21,7 +21,7 @@ func TestParseProgress_IgnoresNonDownloadPhases(t *testing.T) {
 		"[Merger] Merging formats into \"file.mp4\" 100%", // should be ignored
 		"remedia-420000-1000000-0-5",
 		"[ffmpeg] Post-process file 100%", // should be ignored
-		"remedia-1000000-1000000-0-0", // should not set to final 100 here
+		"remedia-1000000-1000000-0-0",     // should not set to final 100 here
 	}
 	sc := bufio.NewScanner(strings.NewReader(strings.Join(lines, "\n")))
 	m.parseProgress("x", sc)
