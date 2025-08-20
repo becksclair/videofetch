@@ -21,6 +21,7 @@ run: build
 
 # Generate Templ components (optional for development)
 generate:
+	bun run build-css
 	@command -v templ >/dev/null 2>&1 || { echo "templ not found; run 'make tools' first" >&2; exit 1; }
 	templ generate
 

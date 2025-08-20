@@ -1,0 +1,16 @@
+{
+  "name": "videofetch",
+  "private": true,
+  "scripts": {
+    "build-css": "tailwindcss -i ./src/css/input.css -o ./static/style.css",
+    "watch-css": "tailwindcss -i ./src/css/input.css -o ./static/style.css --watch",
+    "dev": "bun run watch-css"
+  },
+  "devDependencies": {
+    "tailwindcss": "^4.1.12"
+  },
+  "trustedDependencies": [
+    "@parcel/watcher",
+    "@tailwindcss/oxide"
+  ]
+}

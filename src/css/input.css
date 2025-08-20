@@ -1,0 +1,83 @@
+@import "tailwindcss";
+/* Tailwind v4 configless: narrow to UI templates only */
+@source "../../internal/ui/**/*.{templ,go,html}";
+
+/* Custom styles for VideoFetch */
+:root { 
+	color-scheme: light dark; 
+}
+
+body { 
+	font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif; 
+}
+
+.mono { 
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; 
+}
+
+/* Progress bar component */
+.progress { 
+	width: 220px; 
+	height: 8px; 
+	background: #e5e7eb; 
+	border-radius: 9999px; 
+	overflow: hidden; 
+	display: inline-block; 
+	vertical-align: middle; 
+}
+
+.bar { 
+	height: 100%; 
+	background: #4f46e5; 
+}
+
+.pct { 
+	display: inline-block; 
+	width: 44px; 
+	text-align: right; 
+	font-size: 12px; 
+	color: #6b7280; 
+	margin-left: 6px; 
+}
+
+/* Status badges */
+.badge { 
+	display: inline-block; 
+	padding: 2px 8px; 
+	border-radius: 9999px; 
+	font-size: 12px; 
+}
+
+.queued { 
+	background: #e5e7eb; 
+	color: #111827; 
+}
+
+.downloading { 
+	background: #dbeafe; 
+	color: #1e3a8a; 
+}
+
+.completed { 
+	background: #dcfce7; 
+	color: #166534; 
+}
+
+.failed { 
+	background: #fee2e2; 
+	color: #991b1b; 
+}
+
+.err { 
+	color: #b91c1c; 
+	font-size: 12px; 
+	max-width: 420px; 
+	display: inline-block; 
+}
+
+/* Dark mode adjustments */
+@media (prefers-color-scheme: dark) {
+	.progress { 
+		background: #374151; 
+	}
+}

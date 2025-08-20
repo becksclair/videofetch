@@ -176,6 +176,9 @@ func New(mgr downloadManager) http.Handler {
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 	}))
 
+	// Static files
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static/"))))
+
 	// Healthcheck
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
