@@ -33,6 +33,7 @@ go build -o videofetch ./cmd/videofetch
   - Linux/macOS: `$HOME/.cache/videofetch/videofectch.db`
 
 Notes:
+
 - The database is always enabled; omitting `--db` uses the default path above.
 - Rate limiting: 60 requests/minute per client IP.
 
@@ -137,6 +138,7 @@ Health check; returns `ok`.
 - Server-rendered using `github.com/a-h/templ`, updated via HTMX; no client build step.
 
 Dev notes:
+
 - The generated `.templ` Go is committed. If you modify templates:
   - `make tools` (one-time), then `make generate` to re-generate Templ and rebuild CSS.
 - CSS is built from Tailwind v4 via `bun run build-css` into `./static/style.css`.
