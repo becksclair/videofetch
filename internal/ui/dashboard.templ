@@ -20,13 +20,78 @@ templ Dashboard(items []*download.Item) {
             <link rel="apple-touch-icon" sizes="180x180" href="/static/png/web/apple-touch-icon-180.png">
             <script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2" crossorigin="anonymous"></script>
             <link rel="stylesheet" href="/static/style.css">
+            <script>
+                // HTMX error handling to gracefully handle server disconnections
+                document.addEventListener('DOMContentLoaded', function() {
+                    let errorCount = 0;
+                    let maxErrors = 3;
+                    let isServerDown = false;
+                    let currentInterval = 2; // seconds
+                    const originalInterval = 2;
+                    const maxInterval = 30;
+                    
+                    function updatePollingInterval(intervalSeconds) {
+                        const queueDiv = document.getElementById('queue');
+                        if (queueDiv && !isServerDown) {
+                            queueDiv.setAttribute('hx-trigger', `load, every ${intervalSeconds}s, refresh`);
+                            htmx.process(queueDiv); // Reprocess to apply new trigger
+                        }
+                    }
+                    
+                    document.body.addEventListener('htmx:sendError', function(evt) {
+                        errorCount++;
+                        console.log(`HTMX request failed (${errorCount}/${maxErrors}):`, evt.detail);
+                        
+                        if (errorCount >= maxErrors && !isServerDown) {
+                            isServerDown = true;
+                            // Stop polling and show error message
+                            const queueDiv = document.getElementById('queue');
+                            if (queueDiv) {
+                                queueDiv.removeAttribute('hx-trigger');
+                                queueDiv.innerHTML = '<div class="text-red-600 text-center p-4">⚠️ Lost connection to server. Please refresh the page when server is back online.</div>';
+                            }
+                            console.log('Server appears to be down. Stopped polling.');
+                        } else if (errorCount > 0 && !isServerDown) {
+                            // Implement exponential backoff
+                            currentInterval = Math.min(currentInterval * 2, maxInterval);
+                            updatePollingInterval(currentInterval);
+                            console.log(`Increased polling interval to ${currentInterval}s due to errors`);
+                        }
+                    });
+                    
+                    document.body.addEventListener('htmx:afterRequest', function(evt) {
+                        // Reset error count and interval on successful request
+                        if (evt.detail.successful) {
+                            if (errorCount > 0) {
+                                errorCount = 0;
+                                currentInterval = originalInterval;
+                                updatePollingInterval(currentInterval);
+                                console.log('Connection restored, reset polling to normal interval');
+                            }
+                            if (isServerDown) {
+                                isServerDown = false;
+                                location.reload(); // Reload to restore normal functionality
+                            }
+                        }
+                    });
+                    
+                    document.body.addEventListener('htmx:responseError', function(evt) {
+                        if (evt.detail.xhr.status === 0) {
+                            // Connection error (server down)
+                            errorCount++;
+                        }
+                    });
+                });
+            </script>
         </head>
         <body class="max-w-5xl mx-auto p-4">
             <h1 class="text-2xl font-semibold mb-4">VideoFetch Dashboard</h1>
-            <form method="post" action="/dashboard/enqueue" class="flex gap-2 mb-3">
+            <form hx-post="/dashboard/enqueue" hx-target="#enqueue-status" hx-swap="innerHTML" class="flex gap-2 mb-3">
                 <input type="url" name="url" placeholder="https://example.com/video" required class="flex-1 border rounded px-3 py-2" />
-                <button type="submit" class="px-3 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-500">Enqueue</button>
+                <button type="submit" class="px-3 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-500" hx-indicator="#loading">Enqueue</button>
             </form>
+            <div id="enqueue-status" class="mb-3"></div>
+            <div id="loading" class="htmx-indicator text-sm text-gray-600">Enqueueing...</div>
             <form id="controls-form" class="flex gap-4 items-center text-sm mb-4" hx-get="/dashboard/rows" hx-target="#queue" hx-trigger="change" hx-swap="innerHTML">
                 <label class="text-gray-600 dark:text-gray-300">Status:
                     <select name="status" class="border border-gray-300 rounded px-2 py-1 ml-2 text-gray-900">
@@ -53,7 +118,7 @@ templ Dashboard(items []*download.Item) {
                     </select>
                 </label>
             </form>
-            <div id="queue" hx-get="/dashboard/rows" hx-trigger="load, every 2s" hx-include="#controls-form" hx-target="#queue" hx-swap="innerHTML">
+            <div id="queue" hx-get="/dashboard/rows" hx-trigger="load, every 2s, refresh" hx-include="#controls-form" hx-target="#queue" hx-swap="innerHTML">
                 @QueueTable(items)
             </div>
         </body>

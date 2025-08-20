@@ -327,63 +327,75 @@ func New(mgr downloadManager, st *store.Store) http.Handler {
 			return
 		}
 		if err := r.ParseForm(); err != nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte("invalid form"))
+			_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Invalid form data</div>`))
 			return
 		}
 		u := strings.TrimSpace(r.Form.Get("url"))
 		if !validURL(u) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte("invalid url"))
+			_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Invalid URL</div>`))
 			return
 		}
-		// If store available, prefetch media info and create DB record first
-		var dbid int64
-		var title string
-		var dur int64
-		var thumb string
-		if storeCreate != nil {
-			if mi, err := download.FetchMediaInfo(u); err == nil {
-				title, dur, thumb = mi.Title, mi.DurationSec, mi.ThumbnailURL
-			} else {
-				// Fallbacks: still create a record with URL as title
-				title = u
-			}
-			if idv, err := storeCreate(r.Context(), u, title, dur, thumb, "pending", 0); err == nil {
-				dbid = idv
-			} else {
-				log.Printf("db create error: %v", err)
-			}
-		}
+
+		// Enqueue immediately without metadata fetching to make it async
 		id, err := mgr.Enqueue(u)
 		if err != nil {
-			// Map known errors to user-facing messages
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			switch err.Error() {
 			case "queue_full":
 				w.WriteHeader(http.StatusTooManyRequests)
-				_, _ = w.Write([]byte("queue full"))
-				return
+				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Queue is full, try again later</div>`))
 			case "shutting_down":
 				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = w.Write([]byte("shutting down"))
-				return
+				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Service is shutting down</div>`))
 			default:
 				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte("internal error"))
-				return
+				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Internal error</div>`))
 			}
+			return
 		}
-		if dbid > 0 {
-			mgr.AttachDB(id, dbid)
-			if title != "" || dur > 0 || thumb != "" {
-				mgr.SetMeta(id, title, dur, thumb)
-				if storeUpdateMeta != nil {
-					_ = storeUpdateMeta(r.Context(), dbid, title, dur, thumb)
+
+		// Create minimal DB record and fetch metadata asynchronously
+		if storeCreate != nil {
+			go func() {
+				var dbid int64
+				var title string
+				var dur int64
+				var thumb string
+				
+				// Create initial DB record with URL as title
+				if idv, err := storeCreate(context.Background(), u, u, 0, "", "pending", 0); err == nil {
+					dbid = idv
+					mgr.AttachDB(id, dbid)
+					
+					// Fetch metadata asynchronously
+					if mi, err := download.FetchMediaInfo(u); err == nil {
+						title, dur, thumb = mi.Title, mi.DurationSec, mi.ThumbnailURL
+						mgr.SetMeta(id, title, dur, thumb)
+						if storeUpdateMeta != nil {
+							_ = storeUpdateMeta(context.Background(), dbid, title, dur, thumb)
+						}
+					}
+				} else {
+					log.Printf("db create error: %v", err)
 				}
-			}
+			}()
 		}
-		// Redirect back to dashboard so the HTMX poll refreshes
-		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+
+		// Return immediate success response with auto-clear and trigger queue refresh
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		
+		// Generate response with success message and script to refresh queue
+		response := `<div class="text-green-600 text-sm">✓ Video queued successfully <script>
+			setTimeout(() => document.getElementById('enqueue-status').innerHTML = '', 3000);
+			htmx.trigger('#queue', 'refresh');
+		</script></div>`
+		
+		_, _ = w.Write([]byte(response))
 	}))
 
 	// Static files

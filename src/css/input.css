@@ -75,6 +75,16 @@ body {
 	display: inline-block; 
 }
 
+/* HTMX indicators */
+.htmx-indicator {
+	display: none;
+}
+
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+	display: inline;
+}
+
 /* Dark mode adjustments */
 @media (prefers-color-scheme: dark) {
 	.progress { 
