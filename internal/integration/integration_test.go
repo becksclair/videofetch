@@ -39,7 +39,7 @@ func TestEndToEnd_BatchDownload(t *testing.T) {
 	mgr := download.NewManager(outDir, 2, 8)
 	t.Cleanup(func() { mgr.Shutdown() })
 
-	h := server.New(mgr)
+	h := server.New(mgr, nil)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
@@ -139,7 +139,7 @@ func TestEndToEnd_DownloadSingle(t *testing.T) {
 	outDir := t.TempDir()
 	mgr := download.NewManager(outDir, 2, 8)
 	t.Cleanup(func() { mgr.Shutdown() })
-	h := server.New(mgr)
+	h := server.New(mgr, nil)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
@@ -260,7 +260,7 @@ func TestProgress_NoEarlyHundred(t *testing.T) {
 	outDir := t.TempDir()
 	mgr := download.NewManager(outDir, 1, 4)
 	t.Cleanup(func() { mgr.Shutdown() })
-	h := server.New(mgr)
+	h := server.New(mgr, nil)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 

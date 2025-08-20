@@ -30,6 +30,9 @@ Flags:
   yt-dlp format selector passed as `-f`. CLI flag overrides `VIDEOFETCH_YTDLP_FORMAT`.
 - `--yt-dlp-impersonate` (default: empty): yt-dlp `--impersonate` client, e.g.,
   `chrome` or `chrome:windows-10`. CLI flag overrides `VIDEOFETCH_YTDLP_IMPERSONATE`.
+- `--db` (optional): path to SQLite database file. If omitted, defaults to the OS cache directory at `videofetch/videofectch.db`.
+  - Windows: `%APPDATA%/videofetch/videofectch.db`
+  - Linux/macOS: `$HOME/.cache/videofetch/videofectch.db`
 
 ## API
 
@@ -51,7 +54,8 @@ Response:
 {
   "status": "success|error",
   "message": "string",
-  "id": "string"
+  "id": "string",
+  "db_id": 123
 }
 ```
 
@@ -71,7 +75,8 @@ Response:
 {
   "status": "success|error",
   "message": "string",
-  "ids": ["string"]
+  "ids": ["string"],
+  "db_ids": [123, 456]
 }
 ```
 
@@ -86,6 +91,21 @@ Response:
     { "id": "...", "url": "...", "progress": 0-100, "state": "queued|downloading|completed|failed", "error": "string" }
   ]
 }
+
+### GET /api/downloads
+
+Query params: `status=pending|downloading|completed|error`, `sort=created_at|title|status`, `order=asc|desc`.
+
+Response (when the SQLite store is enabled):
+
+```json
+{
+  "status": "success",
+  "downloads": [
+    { "id": 1, "url": "...", "title": "...", "duration": 123, "thumbnail_url": "...", "status": "downloading", "progress": 42.0, "created_at": "...", "updated_at": "..." }
+  ]
+}
+```
 ```
 
 ## Error codes/messages
