@@ -49,11 +49,8 @@ func TestDatabasePersistence(t *testing.T) {
 		hooks := &testStoreHooks{st: st}
 
 		// Create download manager with hooks
-		mgr := download.NewManagerWithOptions(outputDir, 2, 8, download.ManagerOptions{
-			Format:      "bestvideo*+bestaudio/best",
-			Impersonate: "",
-			Hooks:       hooks,
-		})
+		mgr := download.NewManager(outputDir, 2, 8)
+		mgr.SetHooks(hooks)
 		defer mgr.Shutdown()
 
 		// Create server with database

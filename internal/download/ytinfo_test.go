@@ -102,7 +102,7 @@ func TestValidateURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateURL(tt.url)
-			
+
 			if tt.wantError {
 				if err == nil {
 					t.Errorf("validateURL(%q) expected error containing %q, got nil", tt.url, tt.errorMsg)
@@ -199,64 +199,6 @@ func TestTruncateUTF8(t *testing.T) {
 	}
 }
 
-func TestShouldFallback(t *testing.T) {
-	tests := []struct {
-		name     string
-		errText  string
-		expected bool
-	}{
-		{
-			name:     "HTTP 403 error",
-			errText:  "HTTP Error 403: Forbidden",
-			expected: true,
-		},
-		{
-			name:     "fragment not found",
-			errText:  "fragment 1 not found",
-			expected: true,
-		},
-		{
-			name:     "requested format not available",
-			errText:  "requested format is not available",
-			expected: true,
-		},
-		{
-			name:     "unable to continue",
-			errText:  "unable to continue downloading",
-			expected: true,
-		},
-		{
-			name:     "case insensitive HTTP 403",
-			errText:  "http error 403: forbidden",
-			expected: true,
-		},
-		{
-			name:     "generic network error",
-			errText:  "network connection failed",
-			expected: false,
-		},
-		{
-			name:     "empty error",
-			errText:  "",
-			expected: false,
-		},
-		{
-			name:     "unrelated error",
-			errText:  "file not found locally",
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := shouldFallback(tt.errText)
-			if result != tt.expected {
-				t.Errorf("shouldFallback(%q) = %v, expected %v", tt.errText, result, tt.expected)
-			}
-		})
-	}
-}
-
 // Helper functions
 
 func repeatString(s string, count int) string {
@@ -277,7 +219,7 @@ func containsString(s, substr string) bool {
 	if len(substr) > len(s) {
 		return false
 	}
-	
+
 	for i := 0; i <= len(s)-len(substr); i++ {
 		found := true
 		for j := 0; j < len(substr); j++ {

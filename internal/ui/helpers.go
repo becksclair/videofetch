@@ -9,7 +9,7 @@ func ShortID(id string) string {
 	if utf8.RuneCountInString(id) <= maxLen {
 		return id
 	}
-	
+
 	// Truncate at rune boundary
 	count := 0
 	for i := range id {

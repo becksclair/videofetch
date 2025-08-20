@@ -189,7 +189,7 @@ func TestListDownloads_FilterByStatus(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	
+
 	// Create downloads with different statuses
 	_, err := store.CreateDownload(ctx, "https://example.com/video1", "Video 1", 300, "", "pending", 0.0)
 	if err != nil {
@@ -224,7 +224,7 @@ func TestListDownloads_Sort(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	
+
 	// Create downloads with different titles
 	_, err := store.CreateDownload(ctx, "https://example.com/video1", "B Video", 300, "", "pending", 0.0)
 	if err != nil {

@@ -10,11 +10,9 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,11 +28,6 @@ const (
 	StateCompleted   State = "completed"
 	StateFailed      State = "failed"
 )
-
-// Default yt-dlp format selection used when none is specified via Manager
-// or VIDEOFETCH_YTDLP_FORMAT environment variable. Prefer any best streams to
-// maximize success (may require ffmpeg for merging).
-const defaultYTDLPFormat = "bestvideo*+bestaudio/best"
 
 // Buffer pool for progress parsing to reduce allocations
 var progressBufferPool = sync.Pool{
@@ -78,36 +71,10 @@ type Manager struct {
 	mu        sync.RWMutex
 	downloads map[string]*Item
 
-	// optional yt-dlp format selector (passed as -f). If empty, falls back to
-	// env var VIDEOFETCH_YTDLP_FORMAT and then to a built-in default.
-	ytdlpFormat string
-
-	// optional yt-dlp impersonation client (passed as --impersonate). If empty,
-	// falls back to env var VIDEOFETCH_YTDLP_IMPERSONATE; if still empty, not set.
-	ytdlpImpersonate string
-
 	hooks Hooks
 }
 
-// NewManager creates a download manager with a worker pool and a bounded queue.
 func NewManager(outputDir string, workers, queueCap int) *Manager {
-	return NewManagerWithOptions(outputDir, workers, queueCap, ManagerOptions{})
-}
-
-// ManagerOptions configures yt-dlp invocation behavior.
-type ManagerOptions struct {
-	Format      string
-	Impersonate string
-	Hooks       Hooks
-}
-
-// NewManagerWithFormat is like NewManager but allows specifying a yt-dlp format selector.
-func NewManagerWithFormat(outputDir string, workers, queueCap int, ytdlpFormat string) *Manager {
-	return NewManagerWithOptions(outputDir, workers, queueCap, ManagerOptions{Format: ytdlpFormat})
-}
-
-// NewManagerWithOptions allows specifying format and impersonation.
-func NewManagerWithOptions(outputDir string, workers, queueCap int, opts ManagerOptions) *Manager {
 	if workers <= 0 {
 		workers = max(runtime.NumCPU(), 1)
 	}
@@ -115,18 +82,20 @@ func NewManagerWithOptions(outputDir string, workers, queueCap int, opts Manager
 		queueCap = 64
 	}
 	m := &Manager{
-		outDir:           outputDir,
-		jobs:             make(chan job, queueCap),
-		downloads:        make(map[string]*Item, queueCap*2),
-		ytdlpFormat:      opts.Format,
-		ytdlpImpersonate: opts.Impersonate,
-		hooks:            opts.Hooks,
+		outDir:    outputDir,
+		jobs:      make(chan job, queueCap),
+		downloads: make(map[string]*Item, queueCap*2),
 	}
 	for i := 0; i < workers; i++ {
 		m.wg.Add(1)
 		go m.worker(i)
 	}
 	return m
+}
+
+// SetHooks configures the hooks for progress and state updates
+func (m *Manager) SetHooks(hooks Hooks) {
+	m.hooks = hooks
 }
 
 // StopAccepting stops queueing new jobs; Enqueue will return an error afterwards.
@@ -251,81 +220,36 @@ func (m *Manager) runYTDLP(id, url string) error {
 	if err := CheckYTDLP(); err != nil {
 		return fmt.Errorf("yt_dlp_not_found: %w", err)
 	}
-	
-	config := m.getYTDLPConfig()
+
 	outTpl := filepath.Join(m.outDir, "%(title).200s-%(id)s.%(ext)s")
-	
-	log.Printf("yt-dlp start id=%s url=%s format=%q impersonate=%q output=%s", id, url, config.format, config.impersonate, outTpl)
-	
-	if err := m.runYTDLPOnce(id, url, outTpl, config.format, config.impersonate); err != nil {
-		if shouldFallback(err.Error()) {
-			return m.runWithFallbacks(id, url, outTpl, config.impersonate, err)
-		}
+
+	log.Printf("yt-dlp start id=%s url=%s output=%s", id, url, outTpl)
+
+	args := m.buildYTDLPArgs(url, outTpl)
+	cmd := exec.Command("yt-dlp", args...)
+
+	if err := m.executeWithProgressTracking(id, cmd); err != nil {
 		return err
 	}
-	
-	log.Printf("yt-dlp success id=%s url=%s format=%q impersonate=%q", id, url, config.format, config.impersonate)
+
+	log.Printf("yt-dlp success id=%s url=%s", id, url)
 	return nil
 }
 
-// ytdlpConfig holds configuration for yt-dlp execution
-type ytdlpConfig struct {
-	format      string
-	impersonate string
-}
-
-// getYTDLPConfig resolves format and impersonation settings from various sources
-func (m *Manager) getYTDLPConfig() ytdlpConfig {
-	format := m.ytdlpFormat
-	if format == "" {
-		format = os.Getenv("VIDEOFETCH_YTDLP_FORMAT")
-	}
-	if format == "" {
-		format = defaultYTDLPFormat
-	}
-	
-	impersonate := m.ytdlpImpersonate
-	if impersonate == "" {
-		impersonate = os.Getenv("VIDEOFETCH_YTDLP_IMPERSONATE")
-	}
-	
-	return ytdlpConfig{format: format, impersonate: impersonate}
-}
-
-// runYTDLPOnce executes yt-dlp with specified parameters
-func (m *Manager) runYTDLPOnce(id, url, outTpl, format, impersonate string) error {
-	args := m.buildYTDLPArgs(outTpl, url, format, impersonate)
-	cmd := exec.Command("yt-dlp", args...)
-	
-	return m.executeWithProgressTracking(id, cmd)
-}
-
-// buildYTDLPArgs constructs the argument list for yt-dlp
-func (m *Manager) buildYTDLPArgs(outTpl, url, format, impersonate string) []string {
-	args := []string{
-		"--newline", "--no-color", "--no-playlist",
+// buildYTDLPArgs constructs the argument list for yt-dlp based on Rust reference
+func (m *Manager) buildYTDLPArgs(url, outTpl string) []string {
+	return []string{
+		url,
 		"--progress-template", "download:remedia-%(progress.downloaded_bytes)s-%(progress.total_bytes)s-%(progress.total_bytes_estimate)s-%(progress.eta)s",
+		"--newline",
 		"--continue",
-		"--embed-thumbnail", "--embed-metadata", "--embed-chapters",
-		"--windows-filenames", "--restrict-filenames",
-		"-o", outTpl, url,
+		"--output", outTpl,
+		"--embed-thumbnail",
+		"--embed-subs",
+		"--embed-metadata",
+		"--embed-chapters",
+		"--windows-filenames",
 	}
-	
-	if format != "" {
-		// Insert format flags before the last 3 arguments (output template and URL)
-		base := []string{"-f", format}
-		if len(args) >= 3 {
-			args = append(args[:len(args)-3], append(base, args[len(args)-3:]...)...)
-		} else {
-			args = append(base, args...)
-		}
-	}
-	
-	if impersonate != "" {
-		args = append([]string{"--impersonate", impersonate}, args...)
-	}
-	
-	return args
 }
 
 // executeWithProgressTracking runs the command and tracks progress
@@ -338,13 +262,13 @@ func (m *Manager) executeWithProgressTracking(id string, cmd *exec.Cmd) error {
 	if err != nil {
 		return fmt.Errorf("stdout: %w", err)
 	}
-	
+
 	var stderrBuf, stdoutBuf bytes.Buffer
-	
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
-	
+
 	// Read progress concurrently
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -357,7 +281,7 @@ func (m *Manager) executeWithProgressTracking(id string, cmd *exec.Cmd) error {
 		m.parseProgress(id, bufio.NewScanner(io.TeeReader(stdout, &stdoutBuf)))
 	}()
 	wg.Wait()
-	
+
 	if err := cmd.Wait(); err != nil {
 		tail := tailString(stderrBuf.String(), 512)
 		if tail != "" {
@@ -368,66 +292,11 @@ func (m *Manager) executeWithProgressTracking(id string, cmd *exec.Cmd) error {
 	return nil
 }
 
-// runWithFallbacks tries alternative formats when the initial attempt fails
-func (m *Manager) runWithFallbacks(id, url, outTpl, impersonate string, originalErr error) error {
-	fallbackFormats := []string{
-		"bestvideo*+bestaudio/best",
-		"22/18/b",
-		"b/18",
-	}
-	
-	for _, format := range fallbackFormats {
-		fbImp := impersonate
-		if fbImp == "" {
-			fbImp = detectBestImpersonation()
-		}
-		
-		log.Printf("yt-dlp failed for %s; retrying with fallback: -f %q --impersonate %q", id, format, fbImp)
-		
-		if err := m.runYTDLPOnce(id, url, outTpl, format, fbImp); err != nil {
-			if m.handleFallbackError(id, url, outTpl, format, fbImp, err) {
-				return nil
-			}
-			continue
-		}
-		
-		log.Printf("yt-dlp success id=%s format=%q impersonate=%q (fallback)", id, format, fbImp)
-		return nil
-	}
-	
-	return fmt.Errorf("yt-dlp: all fallbacks failed: %s", tailString(originalErr.Error(), 256))
-}
-
-// handleFallbackError processes errors during fallback attempts
-func (m *Manager) handleFallbackError(id, url, outTpl, format, impersonate string, err error) bool {
-	lower := strings.ToLower(err.Error())
-	
-	// If impersonation isn't supported, retry without it
-	if strings.Contains(lower, "impersonate target") {
-		log.Printf("impersonation %q unavailable; retrying fallback without impersonation", impersonate)
-		if err3 := m.runYTDLPOnce(id, url, outTpl, format, ""); err3 == nil {
-			log.Printf("yt-dlp success id=%s format=%q impersonate=%q (fallback no-imp)", id, format, "")
-			return true
-		}
-	}
-	
-	// Continue to next fallback for these error types
-	if strings.Contains(lower, "ffmpeg") || strings.Contains(lower, "post-processing") {
-		return false
-	}
-	if shouldFallback(lower) {
-		return false
-	}
-	
-	// For other errors, we might want to abort early but let's continue for now
-	return false
-}
-
 func (m *Manager) parseProgress(id string, sc *bufio.Scanner) {
 	// Use buffer pool to reduce allocations
 	bufPtr := progressBufferPool.Get().(*[]byte)
 	defer progressBufferPool.Put(bufPtr)
-	
+
 	// Set a reasonable max buffer size (256KB)
 	sc.Buffer(*bufPtr, 256*1024)
 	// Split on either \n, \r\n, or bare \r since yt-dlp often rewrites
@@ -667,10 +536,17 @@ func truncateUTF8(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	// Find the last valid UTF-8 boundary within n bytes
+
+	// Start from position n and work backwards to find a valid UTF-8 boundary
+	// A valid UTF-8 boundary is either at position 0 or where the byte is not a continuation byte
 	for i := n; i >= 0; i-- {
-		if utf8.ValidString(s[:i]) {
-			return s[:i]
+		// UTF-8 continuation bytes have the form 10xxxxxx (0x80-0xBF)
+		// A valid boundary is where we're not in the middle of a multi-byte sequence
+		if i == 0 || (s[i]&0xC0) != 0x80 {
+			// Verify this is actually a valid UTF-8 string
+			if utf8.ValidString(s[:i]) {
+				return s[:i]
+			}
 		}
 	}
 	// Fallback: empty string if no valid UTF-8 found
@@ -691,95 +567,4 @@ func (m *Manager) callHookWithTimeout(ctx context.Context, fn func()) {
 	case <-done:
 		// Hook completed successfully
 	}
-}
-
-// shouldFallback returns true if the error text suggests we should retry with
-// simpler/pre-merged formats and a more permissive client impersonation.
-func shouldFallback(errText string) bool {
-	et := strings.ToLower(errText)
-	if strings.Contains(et, "http error 403") {
-		return true
-	}
-	if strings.Contains(et, "fragment 1 not found") {
-		return true
-	}
-	if strings.Contains(et, "requested format is not available") {
-		return true
-	}
-	// Generic "unable to continue" often accompanies the above
-	if strings.Contains(et, "unable to continue") {
-		return true
-	}
-	return false
-}
-
-// detectBestImpersonation inspects yt-dlp's available impersonation targets and
-// returns a preferred target string (e.g., "chrome-131:windows-10"). Returns
-// empty string if detection fails.
-func detectBestImpersonation() string {
-	out, err := exec.Command("yt-dlp", "--list-impersonate-targets").CombinedOutput()
-	if err != nil {
-		return ""
-	}
-	lines := strings.Split(string(out), "\n")
-	type cand struct {
-		ver        int
-		os, client string
-	}
-	bestRank := -1
-	bestVer := -1
-	var best cand
-	// Preference order for OS
-	rankOS := func(os string) int {
-		os = strings.ToLower(os)
-		switch os {
-		case "windows-10":
-			return 5
-		case "macos-15":
-			return 4
-		case "macos-14":
-			return 3
-		case "android-14":
-			return 2
-		default:
-			return 1
-		}
-	}
-	for _, ln := range lines {
-		ln = strings.TrimSpace(ln)
-		if ln == "" || strings.HasPrefix(ln, "[") || strings.HasPrefix(ln, "Client") || strings.HasPrefix(ln, "-") {
-			continue
-		}
-		// Expect columns: Client  OS  Source
-		fields := strings.Fields(ln)
-		if len(fields) < 2 {
-			continue
-		}
-		client := strings.ToLower(fields[0]) // e.g., chrome-131
-		osName := strings.ToLower(fields[1]) // e.g., windows-10
-		if !strings.HasPrefix(client, "chrome") {
-			continue
-		}
-		ver := 0
-		if i := strings.Index(client, "-"); i >= 0 && i+1 < len(client) {
-			if n, err := strconv.Atoi(client[i+1:]); err == nil {
-				ver = n
-			}
-		}
-		r := rankOS(osName)
-		if r > bestRank || (r == bestRank && ver > bestVer) {
-			bestRank = r
-			bestVer = ver
-			best = cand{ver: ver, os: osName, client: client}
-		}
-	}
-	if bestRank <= 0 {
-		return ""
-	}
-	// Compose as "chrome-<ver>:<os>" if version known; else "chrome:<os>"
-	base := "chrome"
-	if best.ver > 0 {
-		base = fmt.Sprintf("chrome-%d", best.ver)
-	}
-	return fmt.Sprintf("%s:%s", base, best.os)
 }

@@ -28,10 +28,10 @@ func TestEndToEnd_BatchDownload(t *testing.T) {
 
 	urls := parseURLsEnv()
 	if len(urls) < 2 {
-		// Default to small MP4 samples (fast, public)
+		// Use the specified YouTube URL for integration tests
 		urls = []string{
-			"https://sample-videos.com/video321/mp4/240/big_buck_bunny_240p_1mb.mp4",
-			"https://sample-videos.com/video321/mp4/240/big_buck_bunny_240p_2mb.mp4",
+			"https://www.youtube.com/watch?v=zGDzdps75ns",
+			"https://www.youtube.com/watch?v=zGDzdps75ns",
 		}
 	}
 
@@ -129,12 +129,8 @@ func TestEndToEnd_DownloadSingle(t *testing.T) {
 	}
 	url := os.Getenv("INTEGRATION_URL")
 	if url == "" {
-		// Default to a tiny MP4; avoid YouTube for flakiness
-		url = "https://sample-videos.com/video321/mp4/240/big_buck_bunny_240p_1mb.mp4"
-	}
-	// If testing against YouTube, prefer a stable progressive format to reduce flakiness
-	if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
-		t.Setenv("VIDEOFETCH_YTDLP_FORMAT", "bestvideo*+bestaudio")
+		// Use the specified YouTube URL for integration tests
+		url = "https://www.youtube.com/watch?v=zGDzdps75ns"
 	}
 	outDir := t.TempDir()
 	mgr := download.NewManager(outDir, 2, 8)
@@ -250,12 +246,10 @@ func TestProgress_NoEarlyHundred(t *testing.T) {
 
 	url := os.Getenv("INTEGRATION_URL")
 	if url == "" {
-		// As requested, default to a YouTube URL for this progress test
-		url = "https://www.youtube.com/watch?v=dP1xVpMPn8M"
+		// Use the specified YouTube URL for integration tests
+		url = "https://www.youtube.com/watch?v=zGDzdps75ns"
 	}
 
-	// Force combined best video+audio; lets yt-dlp pick and merge available streams
-	t.Setenv("VIDEOFETCH_YTDLP_FORMAT", "bestvideo*+bestaudio")
 
 	outDir := t.TempDir()
 	mgr := download.NewManager(outDir, 1, 4)

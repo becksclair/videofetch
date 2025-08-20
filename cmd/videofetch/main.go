@@ -21,14 +21,12 @@ import (
 
 func main() {
 	var (
-		outputDir        string
-		port             int
-		host             string
-		workers          int
-		queueCap         int
-		ytdlpFormat      string
-		ytdlpImpersonate string
-		dbPath           string
+		outputDir string
+		port      int
+		host      string
+		workers   int
+		queueCap  int
+		dbPath    string
 	)
 
 	flag.StringVar(&outputDir, "output-dir", "", "Directory for downloaded videos (required)")
@@ -36,8 +34,6 @@ func main() {
 	flag.StringVar(&host, "host", "0.0.0.0", "Host address to bind")
 	flag.IntVar(&workers, "workers", 4, "Number of concurrent download workers")
 	flag.IntVar(&queueCap, "queue", 128, "Download queue capacity")
-	flag.StringVar(&ytdlpFormat, "yt-dlp-format", "bestvideo*+bestaudio/best", "yt-dlp format selector (-f). Overrides VIDEOFETCH_YTDLP_FORMAT if set.")
-	flag.StringVar(&ytdlpImpersonate, "yt-dlp-impersonate", "", "yt-dlp --impersonate client (e.g., 'chrome' or 'chrome:windows-10'). Overrides VIDEOFETCH_YTDLP_IMPERSONATE if set.")
 	flag.StringVar(&dbPath, "db", "", "Path to SQLite database (default: OS cache dir: videofetch/videofetch.db)")
 	flag.Parse()
 
@@ -74,8 +70,8 @@ func main() {
 	// Hooks to persist progress/state
 	hooks := &storeHooks{st: st}
 
-	// CLI flags take precedence; if empty, Manager falls back to env and then defaults
-	mgr := download.NewManagerWithOptions(absOut, workers, queueCap, download.ManagerOptions{Format: ytdlpFormat, Impersonate: ytdlpImpersonate, Hooks: hooks})
+	mgr := download.NewManager(absOut, workers, queueCap)
+	mgr.SetHooks(hooks)
 	defer mgr.Shutdown()
 
 	mux := server.New(mgr, st)
@@ -126,8 +122,8 @@ func (h *storeHooks) OnProgress(dbID int64, progress float64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := h.st.UpdateProgress(ctx, dbID, progress); err != nil {
-		// Ignore database closure errors during shutdown
-		if err.Error() != "sql: database is closed" {
+		// Ignore database closure errors during shutdown and context cancellation
+		if !h.isExpectedError(err) {
 			log.Printf("db update progress id=%d: %v", dbID, err)
 		}
 	}
@@ -174,9 +170,20 @@ func (h *storeHooks) OnStateChange(dbID int64, state download.State, errMsg stri
 		st = "pending"
 	}
 	if err := h.st.UpdateStatus(ctx, dbID, st, errMsg); err != nil {
-		// Ignore database closure errors during shutdown
-		if err.Error() != "sql: database is closed" {
+		// Ignore database closure errors during shutdown and context cancellation
+		if !h.isExpectedError(err) {
 			log.Printf("db update status id=%d: %v", dbID, err)
 		}
 	}
+}
+
+// isExpectedError checks if an error is expected during shutdown or context cancellation
+func (h *storeHooks) isExpectedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return errStr == "sql: database is closed" ||
+		errStr == "context deadline exceeded" ||
+		errStr == "context canceled"
 }

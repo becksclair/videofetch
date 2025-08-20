@@ -337,7 +337,26 @@ func New(mgr downloadManager, st *store.Store) http.Handler {
 			_, _ = w.Write([]byte("invalid url"))
 			return
 		}
-		if _, err := mgr.Enqueue(u); err != nil {
+		// If store available, prefetch media info and create DB record first
+		var dbid int64
+		var title string
+		var dur int64
+		var thumb string
+		if storeCreate != nil {
+			if mi, err := download.FetchMediaInfo(u); err == nil {
+				title, dur, thumb = mi.Title, mi.DurationSec, mi.ThumbnailURL
+			} else {
+				// Fallbacks: still create a record with URL as title
+				title = u
+			}
+			if idv, err := storeCreate(r.Context(), u, title, dur, thumb, "pending", 0); err == nil {
+				dbid = idv
+			} else {
+				log.Printf("db create error: %v", err)
+			}
+		}
+		id, err := mgr.Enqueue(u)
+		if err != nil {
 			// Map known errors to user-facing messages
 			switch err.Error() {
 			case "queue_full":
@@ -347,10 +366,20 @@ func New(mgr downloadManager, st *store.Store) http.Handler {
 			case "shutting_down":
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = w.Write([]byte("shutting down"))
+				return
 			default:
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte("internal error"))
 				return
+			}
+		}
+		if dbid > 0 {
+			mgr.AttachDB(id, dbid)
+			if title != "" || dur > 0 || thumb != "" {
+				mgr.SetMeta(id, title, dur, thumb)
+				if storeUpdateMeta != nil {
+					_ = storeUpdateMeta(r.Context(), dbid, title, dur, thumb)
+				}
 			}
 		}
 		// Redirect back to dashboard so the HTMX poll refreshes
@@ -456,10 +485,10 @@ func clientIP(r *http.Request) string {
 
 // Simple token bucket per IP with fixed refill interval and capacity.
 type ipRateLimiter struct {
-	cap       int
-	refill    time.Duration
-	buckets   map[string]*bucket
-	mu        sync.Mutex
+	cap           int
+	refill        time.Duration
+	buckets       map[string]*bucket
+	mu            sync.Mutex
 	cleanupTicker *time.Ticker
 	stopCleanup   chan struct{}
 }
@@ -499,7 +528,7 @@ func (rl *ipRateLimiter) cleanupLoop() {
 func (rl *ipRateLimiter) cleanup() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	
+
 	cutoff := time.Now().Add(-24 * time.Hour)
 	for ip, bucket := range rl.buckets {
 		if bucket.last.Before(cutoff) {

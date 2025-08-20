@@ -39,6 +39,9 @@ func FetchMediaInfo(inputURL string) (MediaInfo, error) {
 	}
 	defer cmd.Wait()
 	sc := bufio.NewScanner(out)
+	// Set a larger buffer size to handle large JSON responses from yt-dlp
+	buf := make([]byte, 64*1024) // 64KB initial buffer
+	sc.Buffer(buf, 1024*1024)    // 1MB max buffer
 	for sc.Scan() {
 		ln := strings.TrimSpace(sc.Text())
 		if ln == "" {
@@ -67,10 +70,22 @@ func FetchMediaInfo(inputURL string) (MediaInfo, error) {
 			thumb = v
 		}
 		if thumb == "" {
+			// Try to find the best thumbnail from thumbnails array
 			if arr, ok := m["thumbnails"].([]any); ok && len(arr) > 0 {
-				if obj, ok := arr[0].(map[string]any); ok {
-					if u, ok := obj["url"].(string); ok {
-						thumb = u
+				// Look for high-quality thumbnails first (maxresdefault, hqdefault, etc.)
+				for _, item := range arr {
+					if obj, ok := item.(map[string]any); ok {
+						if u, ok := obj["url"].(string); ok {
+							// Prefer higher resolution thumbnails
+							if strings.Contains(u, "maxresdefault") || strings.Contains(u, "hqdefault") {
+								thumb = u
+								break
+							}
+							// Fallback to any thumbnail if we haven't found one yet
+							if thumb == "" {
+								thumb = u
+							}
+						}
 					}
 				}
 			}
