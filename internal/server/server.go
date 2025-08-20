@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -32,7 +34,7 @@ type rateLimiter interface {
 
 // New returns an http.Handler with routes and middleware wired.
 // Minimal interface to abstract the store; nil store disables DB-backed features.
-func New(mgr downloadManager, st *store.Store) http.Handler {
+func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 	rl := newIPRateLimiter(60, time.Minute) // 60 req/min/IP
 	mux := http.NewServeMux()
 	// helpers
@@ -175,6 +177,78 @@ func New(mgr downloadManager, st *store.Store) http.Handler {
 
 	// Optional DB-backed listing; only registered if store is provided via main.
 	if st != nil {
+		mux.HandleFunc("/api/remove", with(rl, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodDelete {
+				methodNotAllowed(w)
+				return
+			}
+			var req struct {
+				ID int64 `json:"id"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil || req.ID <= 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "invalid_request"})
+				return
+			}
+			if err := st.DeleteDownload(r.Context(), req.ID); err != nil {
+				log.Printf("delete download id=%d: %v", req.ID, err)
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "deleted"})
+		}))
+
+		mux.HandleFunc("/api/download_file", with(rl, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				methodNotAllowed(w)
+				return
+			}
+			idStr := r.URL.Query().Get("id")
+			if idStr == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "missing_id"})
+				return
+			}
+			var id int64
+			if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "invalid_id"})
+				return
+			}
+			
+			// Get download record to find filename
+			items, err := st.ListDownloads(r.Context(), store.ListFilter{})
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			
+			var filename string
+			for _, item := range items {
+				if item.ID == id {
+					filename = item.Filename
+					break
+				}
+			}
+			
+			if filename == "" {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "file_not_found"})
+				return
+			}
+			
+			// Check if file exists in output directory
+			fullPath := filepath.Join(outputDir, filename)
+			if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "file_not_found"})
+				return
+			} else if err != nil {
+				log.Printf("stat file %s: %v", fullPath, err)
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			
+			// Serve the file
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+			http.ServeFile(w, r, fullPath)
+		}))
+
 		mux.HandleFunc("/api/downloads", with(rl, func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
 				methodNotAllowed(w)
@@ -271,6 +345,7 @@ func New(mgr downloadManager, st *store.Store) http.Handler {
 					ThumbnailURL: d.ThumbnailURL,
 					Progress:     d.Progress,
 					State:        stt,
+					Filename:     d.Filename,
 				})
 			}
 		} else {
@@ -397,6 +472,47 @@ func New(mgr downloadManager, st *store.Store) http.Handler {
 		
 		_, _ = w.Write([]byte(response))
 	}))
+
+	// Dashboard remove endpoint
+	if st != nil {
+		mux.HandleFunc("/dashboard/remove", with(rl, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w)
+				return
+			}
+			if err := r.ParseForm(); err != nil {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Invalid form data</div>`))
+				return
+			}
+			idStr := strings.TrimSpace(r.Form.Get("id"))
+			var id int64
+			if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id <= 0 {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Invalid ID</div>`))
+				return
+			}
+			
+			if err := st.DeleteDownload(r.Context(), id); err != nil {
+				log.Printf("delete download id=%d: %v", id, err)
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Failed to remove item</div>`))
+				return
+			}
+			
+			// Return success response and trigger queue refresh
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			response := `<div class="text-green-600 text-sm">✓ Item removed <script>
+				setTimeout(() => document.getElementById('remove-status').innerHTML = '', 2000);
+				htmx.trigger('#queue', 'refresh');
+			</script></div>`
+			_, _ = w.Write([]byte(response))
+		}))
+	}
 
 	// Static files
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static/"))))

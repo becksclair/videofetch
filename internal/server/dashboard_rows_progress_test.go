@@ -31,7 +31,7 @@ func (f *fakeMgr) Snapshot(id string) []*download.Item {
 
 func TestDashboardRows_ProgressIncrements(t *testing.T) {
 	prog := 1.0
-	h := New(&fakeMgr{prog: &prog}, nil)
+	h := New(&fakeMgr{prog: &prog}, nil, "/tmp/test")
 
 	// First call: ~1%
 	req1 := httptest.NewRequest(http.MethodGet, "/dashboard/rows", nil)

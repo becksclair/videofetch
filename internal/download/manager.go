@@ -51,6 +51,9 @@ type Item struct {
 
 	// Optional database binding for persistence updates.
 	DBID int64 `json:"db_id,omitempty"`
+	
+	// Filename gets set when download is complete.
+	Filename string `json:"filename,omitempty"`
 
 	startedAt time.Time
 	updatedAt time.Time
@@ -289,6 +292,13 @@ func (m *Manager) executeWithProgressTracking(id string, cmd *exec.Cmd) error {
 		}
 		return fmt.Errorf("yt-dlp: %w", err)
 	}
+
+	// Extract filename from stdout after successful completion
+	stdoutStr := strings.TrimSpace(stdoutBuf.String())
+	if filename := m.extractFilename(stdoutStr); filename != "" {
+		m.setFilename(id, filename)
+	}
+
 	return nil
 }
 
@@ -506,6 +516,63 @@ func (m *Manager) updateFailure(id string, err error) {
 	// reduce noise from long command errors, respecting UTF-8 boundaries
 	msg = truncateUTF8(msg, 512)
 	m.updateState(id, StateFailed, msg)
+}
+
+// extractFilename extracts the downloaded filename from yt-dlp output
+func (m *Manager) extractFilename(output string) string {
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// Look for the destination line that shows where the file was saved
+		if strings.Contains(line, "Destination:") {
+			// Extract filename from "Destination: /path/to/file.ext"
+			parts := strings.SplitN(line, "Destination:", 2)
+			if len(parts) == 2 {
+				path := strings.TrimSpace(parts[1])
+				return filepath.Base(path)
+			}
+		}
+		// Also check for merge output lines like "Merging formats into 'filename'"
+		if strings.Contains(line, "Merging formats into") {
+			start := strings.Index(line, "'")
+			if start != -1 {
+				end := strings.Index(line[start+1:], "'")
+				if end != -1 {
+					path := line[start+1 : start+1+end]
+					return filepath.Base(path)
+				}
+			}
+		}
+		// Check for final output lines with [download] tag
+		if strings.HasPrefix(line, "[download]") && strings.Contains(line, "has already been downloaded") {
+			// Extract from "[download] filename has already been downloaded"
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				return filepath.Base(parts[1])
+			}
+		}
+	}
+	return ""
+}
+
+// setFilename updates the filename for an item and calls the hook
+func (m *Manager) setFilename(id, filename string) {
+	m.mu.Lock()
+	if it, ok := m.downloads[id]; ok {
+		it.Filename = filename
+		it.updatedAt = time.Now()
+		log.Printf("download filename id=%s filename=%s", id, filename)
+		if it.DBID > 0 && m.hooks != nil {
+			dbid := it.DBID
+			fname := filename
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				m.callHookWithTimeout(ctx, func() { m.hooks.OnFilename(dbid, fname) })
+			}()
+		}
+	}
+	m.mu.Unlock()
 }
 
 func genID() string {

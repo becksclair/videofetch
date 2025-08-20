@@ -39,7 +39,7 @@ func TestDownloadSingle_Success(t *testing.T) {
 	h := New(&mockMgr{
 		enqueueFn:  func(url string) (string, error) { return "abc123", nil },
 		snapshotFn: func(id string) []*download.Item { return nil },
-	}, nil)
+	}, nil, "/tmp/test")
 	w := doJSON(t, h, http.MethodPost, "/api/download_single", "10.0.0.1", map[string]string{"url": "https://example.com/video"})
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -57,7 +57,7 @@ func TestDownloadSingle_Success(t *testing.T) {
 }
 
 func TestDownloadSingle_MethodNotAllowed(t *testing.T) {
-	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil)
+	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
 	w := doJSON(t, h, http.MethodGet, "/api/download_single", "10.0.0.2", nil)
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status=%d", w.Code)
@@ -70,7 +70,7 @@ func TestDownloadSingle_MethodNotAllowed(t *testing.T) {
 }
 
 func TestDownloadSingle_InvalidJSON(t *testing.T) {
-	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil)
+	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
 	req := httptest.NewRequest(http.MethodPost, "/api/download_single", bytes.NewBufferString("{"))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Forwarded-For", "10.0.0.3")
@@ -82,7 +82,7 @@ func TestDownloadSingle_InvalidJSON(t *testing.T) {
 }
 
 func TestDownloadSingle_InvalidURL(t *testing.T) {
-	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil)
+	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
 	w := doJSON(t, h, http.MethodPost, "/api/download_single", "10.0.0.4", map[string]string{"url": "ftp://example"})
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d", w.Code)
@@ -107,7 +107,7 @@ func TestDownloadSingle_ErrorMappings(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", tc.err }, snapshotFn: func(id string) []*download.Item { return nil }}, nil)
+			h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", tc.err }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
 			w := doJSON(t, h, http.MethodPost, "/api/download_single", "10.0.0.5", map[string]string{"url": "https://ok"})
 			if w.Code != tc.code {
 				t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
@@ -135,7 +135,7 @@ func TestBatch_Success_Mixed(t *testing.T) {
 			return "", nil
 		},
 		snapshotFn: func(id string) []*download.Item { return nil },
-	}, nil)
+	}, nil, "/tmp/test")
 	body := map[string]any{"urls": []string{"https://a", "invalid://x", "https://b"}}
 	w := doJSON(t, h, http.MethodPost, "/api/download", "10.0.0.6", body)
 	if w.Code != http.StatusOK {
@@ -157,7 +157,7 @@ func TestBatch_Success_Mixed(t *testing.T) {
 }
 
 func TestBatch_NoValidURLs(t *testing.T) {
-	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil)
+	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
 	body := map[string]any{"urls": []string{"notaurl", "ftp://x"}}
 	w := doJSON(t, h, http.MethodPost, "/api/download", "10.0.0.7", body)
 	if w.Code != http.StatusBadRequest {
@@ -166,7 +166,7 @@ func TestBatch_NoValidURLs(t *testing.T) {
 }
 
 func TestBatch_InvalidJSON(t *testing.T) {
-	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil)
+	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
 	req := httptest.NewRequest(http.MethodPost, "/api/download", bytes.NewBufferString("{"))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Forwarded-For", "10.0.0.11")
@@ -187,7 +187,7 @@ func TestStatus_AllAndByID(t *testing.T) {
 			}
 			return []*download.Item{{ID: id, URL: "uX", Progress: 0, State: download.StateQueued}}
 		},
-	}, nil)
+	}, nil, "/tmp/test")
 	// all
 	w := doJSON(t, h, http.MethodGet, "/api/status", "10.0.0.8", nil)
 	if w.Code != http.StatusOK {
@@ -221,7 +221,7 @@ func TestStatus_AllAndByID(t *testing.T) {
 }
 
 func TestStatus_MethodNotAllowed(t *testing.T) {
-	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil)
+	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
 	w := doJSON(t, h, http.MethodPost, "/api/status", "10.0.0.10", nil)
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status=%d", w.Code)
@@ -237,7 +237,7 @@ func TestDashboardRows_FilterAndSort(t *testing.T) {
 	h := New(&mockMgr{
 		enqueueFn:  func(url string) (string, error) { return "", nil },
 		snapshotFn: func(id string) []*download.Item { return items },
-	}, nil)
+	}, nil, "/tmp/test")
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/rows?status=downloading&sort=progress&order=desc", nil)
 	req.Header.Set("X-Forwarded-For", "198.51.100.50")
 	w := httptest.NewRecorder()
@@ -257,7 +257,7 @@ func TestDashboardRows_FilterAndSort(t *testing.T) {
 }
 
 func TestRateLimiting_Exceeds(t *testing.T) {
-	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "x", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil)
+	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "x", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
 	ip := "203.0.113.1"
 	var last *httptest.ResponseRecorder
 	for i := 0; i < 61; i++ {
@@ -274,7 +274,7 @@ func TestRateLimiting_Exceeds(t *testing.T) {
 }
 
 func TestHealthz_OK(t *testing.T) {
-	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil)
+	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)

@@ -21,6 +21,7 @@ type Download struct {
 	ThumbnailURL string    `json:"thumbnail_url"`
 	Status       string    `json:"status"`
 	Progress     float64   `json:"progress"`
+	Filename     string    `json:"filename"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS downloads (
     thumbnail_url TEXT,
     status TEXT,
     progress REAL,
+    filename TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -66,7 +68,17 @@ CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status);
 CREATE INDEX IF NOT EXISTS idx_downloads_created_at ON downloads(created_at);
 `
 	_, err := db.Exec(ddl)
-	return err
+	if err != nil {
+		return err
+	}
+	
+	// Add filename column if it doesn't exist (migration for existing DBs)
+	_, err = db.Exec(`ALTER TABLE downloads ADD COLUMN filename TEXT`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	
+	return nil
 }
 
 // Close closes the underlying DB.
@@ -175,7 +187,7 @@ func (s *Store) ListDownloads(ctx context.Context, f ListFilter) ([]Download, er
 	}
 	var args []any
 	sb := strings.Builder{}
-	sb.WriteString("SELECT id, url, title, duration, thumbnail_url, status, progress, created_at, updated_at FROM downloads")
+	sb.WriteString("SELECT id, url, title, duration, thumbnail_url, status, progress, filename, created_at, updated_at FROM downloads")
 	if f.Status != "" {
 		sb.WriteString(" WHERE status = ?")
 		args = append(args, normalizeStatus(f.Status))
@@ -200,12 +212,34 @@ func (s *Store) ListDownloads(ctx context.Context, f ListFilter) ([]Download, er
 	out := make([]Download, 0, 64)
 	for rows.Next() {
 		var d Download
-		if err := rows.Scan(&d.ID, &d.URL, &d.Title, &d.Duration, &d.ThumbnailURL, &d.Status, &d.Progress, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		var filename sql.NullString
+		if err := rows.Scan(&d.ID, &d.URL, &d.Title, &d.Duration, &d.ThumbnailURL, &d.Status, &d.Progress, &filename, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, err
 		}
+		d.Filename = filename.String
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// UpdateFilename sets the filename when download is complete.
+func (s *Store) UpdateFilename(ctx context.Context, id int64, filename string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE downloads SET filename = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, filename, id)
+	if err != nil {
+		return err
+	}
+	log.Printf("db: update_filename id=%d filename=%q", id, filename)
+	return nil
+}
+
+// DeleteDownload removes a download record from the database.
+func (s *Store) DeleteDownload(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM downloads WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	log.Printf("db: delete_download id=%d", id)
+	return nil
 }
 
 func normalizeStatus(s string) string {

@@ -36,7 +36,7 @@ func Dashboard(items []*download.Item) templ.Component {
 			templ_7745c5c3_Var1 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>VideoFetch Dashboard</title><link rel=\"icon\" type=\"image/x-icon\" href=\"/static/App.ico\"><link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/static/png/web/favicon-32.png\"><link rel=\"icon\" type=\"image/png\" sizes=\"16x16\" href=\"/static/png/web/favicon-16.png\"><link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/static/png/web/apple-touch-icon-180.png\"><script src=\"https://unpkg.com/htmx.org@1.9.12\" integrity=\"sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2\" crossorigin=\"anonymous\"></script><link rel=\"stylesheet\" href=\"/static/style.css\"><script>\n                // HTMX error handling to gracefully handle server disconnections\n                document.addEventListener('DOMContentLoaded', function() {\n                    let errorCount = 0;\n                    let maxErrors = 3;\n                    let isServerDown = false;\n                    let currentInterval = 2; // seconds\n                    const originalInterval = 2;\n                    const maxInterval = 30;\n                    \n                    function updatePollingInterval(intervalSeconds) {\n                        const queueDiv = document.getElementById('queue');\n                        if (queueDiv && !isServerDown) {\n                            queueDiv.setAttribute('hx-trigger', `load, every ${intervalSeconds}s, refresh`);\n                            htmx.process(queueDiv); // Reprocess to apply new trigger\n                        }\n                    }\n                    \n                    document.body.addEventListener('htmx:sendError', function(evt) {\n                        errorCount++;\n                        console.log(`HTMX request failed (${errorCount}/${maxErrors}):`, evt.detail);\n                        \n                        if (errorCount >= maxErrors && !isServerDown) {\n                            isServerDown = true;\n                            // Stop polling and show error message\n                            const queueDiv = document.getElementById('queue');\n                            if (queueDiv) {\n                                queueDiv.removeAttribute('hx-trigger');\n                                queueDiv.innerHTML = '<div class=\"text-red-600 text-center p-4\">⚠️ Lost connection to server. Please refresh the page when server is back online.</div>';\n                            }\n                            console.log('Server appears to be down. Stopped polling.');\n                        } else if (errorCount > 0 && !isServerDown) {\n                            // Implement exponential backoff\n                            currentInterval = Math.min(currentInterval * 2, maxInterval);\n                            updatePollingInterval(currentInterval);\n                            console.log(`Increased polling interval to ${currentInterval}s due to errors`);\n                        }\n                    });\n                    \n                    document.body.addEventListener('htmx:afterRequest', function(evt) {\n                        // Reset error count and interval on successful request\n                        if (evt.detail.successful) {\n                            if (errorCount > 0) {\n                                errorCount = 0;\n                                currentInterval = originalInterval;\n                                updatePollingInterval(currentInterval);\n                                console.log('Connection restored, reset polling to normal interval');\n                            }\n                            if (isServerDown) {\n                                isServerDown = false;\n                                location.reload(); // Reload to restore normal functionality\n                            }\n                        }\n                    });\n                    \n                    document.body.addEventListener('htmx:responseError', function(evt) {\n                        if (evt.detail.xhr.status === 0) {\n                            // Connection error (server down)\n                            errorCount++;\n                        }\n                    });\n                });\n            </script></head><body class=\"max-w-5xl mx-auto p-4\"><h1 class=\"text-2xl font-semibold mb-4\">VideoFetch Dashboard</h1><form hx-post=\"/dashboard/enqueue\" hx-target=\"#enqueue-status\" hx-swap=\"innerHTML\" class=\"flex gap-2 mb-3\"><input type=\"url\" name=\"url\" placeholder=\"https://example.com/video\" required class=\"flex-1 border rounded px-3 py-2\"> <button type=\"submit\" class=\"px-3 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-500\" hx-indicator=\"#loading\">Enqueue</button></form><div id=\"enqueue-status\" class=\"mb-3\"></div><div id=\"loading\" class=\"htmx-indicator text-sm text-gray-600\">Enqueueing...</div><form id=\"controls-form\" class=\"flex gap-4 items-center text-sm mb-4\" hx-get=\"/dashboard/rows\" hx-target=\"#queue\" hx-trigger=\"change\" hx-swap=\"innerHTML\"><label class=\"text-gray-600 dark:text-gray-300\">Status: <select name=\"status\" class=\"border border-gray-300 rounded px-2 py-1 ml-2 text-gray-900\"><option value=\"\">All</option> <option value=\"queued\">Queued</option> <option value=\"downloading\">Downloading</option> <option value=\"completed\">Completed</option> <option value=\"failed\">Failed</option></select></label> <label class=\"text-gray-600 dark:text-gray-300\">Sort: <select name=\"sort\" class=\"border border-gray-300 rounded px-2 py-1 ml-2 text-gray-900\"><option value=\"\">Default</option> <option value=\"date\">Date</option> <option value=\"status\">Status</option> <option value=\"title\">Title</option> <option value=\"progress\">Progress</option></select></label> <label class=\"text-gray-600 dark:text-gray-300\">Order: <select name=\"order\" class=\"border border-gray-300 rounded px-2 py-1 ml-2 text-gray-900\"><option value=\"desc\">Desc</option> <option value=\"asc\">Asc</option></select></label></form><div id=\"queue\" hx-get=\"/dashboard/rows\" hx-trigger=\"load, every 2s, refresh\" hx-include=\"#controls-form\" hx-target=\"#queue\" hx-swap=\"innerHTML\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>VideoFetch Dashboard</title><link rel=\"icon\" type=\"image/x-icon\" href=\"/static/App.ico\"><link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/static/png/web/favicon-32.png\"><link rel=\"icon\" type=\"image/png\" sizes=\"16x16\" href=\"/static/png/web/favicon-16.png\"><link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/static/png/web/apple-touch-icon-180.png\"><script src=\"https://unpkg.com/htmx.org@1.9.12\" integrity=\"sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2\" crossorigin=\"anonymous\"></script><link rel=\"stylesheet\" href=\"/static/style.css\"><script>\n                // HTMX error handling to gracefully handle server disconnections\n                document.addEventListener('DOMContentLoaded', function() {\n                    let errorCount = 0;\n                    let maxErrors = 3;\n                    let isServerDown = false;\n                    let currentInterval = 2; // seconds\n                    const originalInterval = 2;\n                    const maxInterval = 30;\n                    \n                    function updatePollingInterval(intervalSeconds) {\n                        const queueDiv = document.getElementById('queue');\n                        if (queueDiv && !isServerDown) {\n                            queueDiv.setAttribute('hx-trigger', `load, every ${intervalSeconds}s, refresh`);\n                            htmx.process(queueDiv); // Reprocess to apply new trigger\n                        }\n                    }\n                    \n                    document.body.addEventListener('htmx:sendError', function(evt) {\n                        errorCount++;\n                        console.log(`HTMX request failed (${errorCount}/${maxErrors}):`, evt.detail);\n                        \n                        if (errorCount >= maxErrors && !isServerDown) {\n                            isServerDown = true;\n                            // Stop polling and show error message\n                            const queueDiv = document.getElementById('queue');\n                            if (queueDiv) {\n                                queueDiv.removeAttribute('hx-trigger');\n                                queueDiv.innerHTML = '<div class=\"text-red-600 text-center p-4\">⚠️ Lost connection to server. Please refresh the page when server is back online.</div>';\n                            }\n                            console.log('Server appears to be down. Stopped polling.');\n                        } else if (errorCount > 0 && !isServerDown) {\n                            // Implement exponential backoff\n                            currentInterval = Math.min(currentInterval * 2, maxInterval);\n                            updatePollingInterval(currentInterval);\n                            console.log(`Increased polling interval to ${currentInterval}s due to errors`);\n                        }\n                    });\n                    \n                    document.body.addEventListener('htmx:afterRequest', function(evt) {\n                        // Reset error count and interval on successful request\n                        if (evt.detail.successful) {\n                            if (errorCount > 0) {\n                                errorCount = 0;\n                                currentInterval = originalInterval;\n                                updatePollingInterval(currentInterval);\n                                console.log('Connection restored, reset polling to normal interval');\n                            }\n                            if (isServerDown) {\n                                isServerDown = false;\n                                location.reload(); // Reload to restore normal functionality\n                            }\n                        }\n                    });\n                    \n                    document.body.addEventListener('htmx:responseError', function(evt) {\n                        if (evt.detail.xhr.status === 0) {\n                            // Connection error (server down)\n                            errorCount++;\n                        }\n                    });\n                });\n            </script></head><body class=\"max-w-5xl mx-auto p-4\"><h1 class=\"text-2xl font-semibold mb-4\">VideoFetch Dashboard</h1><form hx-post=\"/dashboard/enqueue\" hx-target=\"#enqueue-status\" hx-swap=\"innerHTML\" class=\"flex gap-2 mb-3\"><input type=\"url\" name=\"url\" placeholder=\"https://example.com/video\" required class=\"flex-1 border rounded px-3 py-2\"> <button type=\"submit\" class=\"px-3 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-500\" hx-indicator=\"#loading\">Enqueue</button></form><div id=\"enqueue-status\" class=\"mb-3\"></div><div id=\"remove-status\" class=\"mb-3\"></div><div id=\"loading\" class=\"htmx-indicator text-sm text-gray-600\">Enqueueing...</div><form id=\"controls-form\" class=\"flex gap-4 items-center text-sm mb-4\" hx-get=\"/dashboard/rows\" hx-target=\"#queue\" hx-trigger=\"change\" hx-swap=\"innerHTML\"><label class=\"text-gray-600 dark:text-gray-300\">Status: <select name=\"status\" class=\"border border-gray-300 rounded px-2 py-1 ml-2 text-gray-900\"><option value=\"\">All</option> <option value=\"queued\">Queued</option> <option value=\"downloading\">Downloading</option> <option value=\"completed\">Completed</option> <option value=\"failed\">Failed</option></select></label> <label class=\"text-gray-600 dark:text-gray-300\">Sort: <select name=\"sort\" class=\"border border-gray-300 rounded px-2 py-1 ml-2 text-gray-900\"><option value=\"\">Default</option> <option value=\"date\">Date</option> <option value=\"status\">Status</option> <option value=\"title\">Title</option> <option value=\"progress\">Progress</option></select></label> <label class=\"text-gray-600 dark:text-gray-300\">Order: <select name=\"order\" class=\"border border-gray-300 rounded px-2 py-1 ml-2 text-gray-900\"><option value=\"desc\">Desc</option> <option value=\"asc\">Asc</option></select></label></form><div id=\"queue\" hx-get=\"/dashboard/rows\" hx-trigger=\"load, every 2s, refresh\" hx-include=\"#controls-form\" hx-target=\"#queue\" hx-swap=\"innerHTML\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -74,7 +74,7 @@ func QueueTable(items []*download.Item) templ.Component {
 			templ_7745c5c3_Var2 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<table class=\"w-full border-collapse\"><thead><tr><th class=\"text-left p-2 border-b border-gray-200\">Thumb</th><th class=\"text-left p-2 border-b border-gray-200\">Title</th><th class=\"text-left p-2 border-b border-gray-200\">URL</th><th class=\"text-left p-2 border-b border-gray-200\">Status</th><th class=\"text-left p-2 border-b border-gray-200\">Duration</th><th class=\"text-left p-2 border-b border-gray-200\">Progress</th><th class=\"text-left p-2 border-b border-gray-200\">Error</th></tr></thead> <tbody id=\"queue-table-body\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<table class=\"w-full border-collapse\"><thead><tr><th class=\"text-left p-2 border-b border-gray-200\">Thumb</th><th class=\"text-left p-2 border-b border-gray-200\">Title</th><th class=\"text-left p-2 border-b border-gray-200\">URL</th><th class=\"text-left p-2 border-b border-gray-200\">Status</th><th class=\"text-left p-2 border-b border-gray-200\">Duration</th><th class=\"text-left p-2 border-b border-gray-200\">Progress</th><th class=\"text-left p-2 border-b border-gray-200\">Error</th><th class=\"text-left p-2 border-b border-gray-200\">Actions</th></tr></thead> <tbody id=\"queue-table-body\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -125,7 +125,7 @@ func QueueRows(items []*download.Item) templ.Component {
 				var templ_7745c5c3_Var4 string
 				templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(it.ThumbnailURL)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 154, Col: 46}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 156, Col: 46}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 				if templ_7745c5c3_Err != nil {
@@ -144,7 +144,7 @@ func QueueRows(items []*download.Item) templ.Component {
 				var templ_7745c5c3_Var5 string
 				templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(it.Title)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 159, Col: 30}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 161, Col: 30}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 				if templ_7745c5c3_Err != nil {
@@ -154,7 +154,7 @@ func QueueRows(items []*download.Item) templ.Component {
 				var templ_7745c5c3_Var6 string
 				templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(it.URL)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 161, Col: 28}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 163, Col: 28}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 				if templ_7745c5c3_Err != nil {
@@ -168,7 +168,7 @@ func QueueRows(items []*download.Item) templ.Component {
 			var templ_7745c5c3_Var7 templ.SafeURL
 			templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinURLErrs(it.URL)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 164, Col: 82}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 166, Col: 82}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
 			if templ_7745c5c3_Err != nil {
@@ -181,7 +181,7 @@ func QueueRows(items []*download.Item) templ.Component {
 			var templ_7745c5c3_Var8 string
 			templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(it.URL)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 164, Col: 168}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 166, Col: 168}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 			if templ_7745c5c3_Err != nil {
@@ -220,7 +220,7 @@ func QueueRows(items []*download.Item) templ.Component {
 				var templ_7745c5c3_Var9 string
 				templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%dm%02ds", it.Duration/60, it.Duration%60))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 178, Col: 77}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 180, Col: 77}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 				if templ_7745c5c3_Err != nil {
@@ -234,7 +234,7 @@ func QueueRows(items []*download.Item) templ.Component {
 			var templ_7745c5c3_Var10 string
 			templ_7745c5c3_Var10, templ_7745c5c3_Err = templruntime.SanitizeStyleAttributeValues("width:" + fmt.Sprintf("%.0f", it.Progress) + "%")
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 182, Col: 112}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 184, Col: 112}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
 			if templ_7745c5c3_Err != nil {
@@ -247,7 +247,7 @@ func QueueRows(items []*download.Item) templ.Component {
 			var templ_7745c5c3_Var11 string
 			templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%.0f%%", it.Progress))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 183, Col: 70}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 185, Col: 70}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 			if templ_7745c5c3_Err != nil {
@@ -265,7 +265,7 @@ func QueueRows(items []*download.Item) templ.Component {
 				var templ_7745c5c3_Var12 string
 				templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(it.Error)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 187, Col: 48}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 189, Col: 48}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
 				if templ_7745c5c3_Err != nil {
@@ -276,7 +276,54 @@ func QueueRows(items []*download.Item) templ.Component {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 22, "</td></tr>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 22, "</td><td class=\"p-2 border-b border-gray-200 align-middle\"><div class=\"flex gap-2\">")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			if it.State == download.StateCompleted && it.Filename != "" {
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, "<a href=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var13 templ.SafeURL
+				templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinURLErrs(templ.SafeURL("/api/download_file?id=" + it.ID))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 195, Col: 81}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 24, "\" class=\"action-btn download-btn\" title=\"Download file\">📥</a> ")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			}
+			if it.State != download.StateDownloading {
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 25, "<form hx-post=\"/dashboard/remove\" hx-target=\"#remove-status\" hx-swap=\"innerHTML\" style=\"display: inline;\"><input type=\"hidden\" name=\"id\" value=\"")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var14 string
+				templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinStringErrs(it.ID)
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 206, Col: 72}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var14))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 26, "\"> <button type=\"submit\" class=\"action-btn remove-btn\" title=\"Remove from database\" hx-confirm=\"Are you sure you want to remove this item?\">🗑️</button></form>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			} else {
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 27, "<button class=\"action-btn remove-btn disabled\" title=\"Cannot remove while downloading\" disabled>🗑️</button>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 28, "</div></td></tr>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

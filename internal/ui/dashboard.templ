@@ -91,6 +91,7 @@ templ Dashboard(items []*download.Item) {
                 <button type="submit" class="px-3 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-500" hx-indicator="#loading">Enqueue</button>
             </form>
             <div id="enqueue-status" class="mb-3"></div>
+            <div id="remove-status" class="mb-3"></div>
             <div id="loading" class="htmx-indicator text-sm text-gray-600">Enqueueing...</div>
             <form id="controls-form" class="flex gap-4 items-center text-sm mb-4" hx-get="/dashboard/rows" hx-target="#queue" hx-trigger="change" hx-swap="innerHTML">
                 <label class="text-gray-600 dark:text-gray-300">Status:
@@ -137,6 +138,7 @@ templ QueueTable(items []*download.Item) {
                 <th class="text-left p-2 border-b border-gray-200">Duration</th>
                 <th class="text-left p-2 border-b border-gray-200">Progress</th>
                 <th class="text-left p-2 border-b border-gray-200">Error</th>
+                <th class="text-left p-2 border-b border-gray-200">Actions</th>
             </tr>
         </thead>
         <tbody id="queue-table-body">
@@ -186,6 +188,37 @@ templ QueueRows(items []*download.Item) {
                 if it.Error != "" {
                     <span class="err">{ it.Error }</span>
                 }
+            </td>
+            <td class="p-2 border-b border-gray-200 align-middle">
+                <div class="flex gap-2">
+                    if it.State == download.StateCompleted && it.Filename != "" {
+                        <a href={ templ.SafeURL("/api/download_file?id=" + it.ID) } 
+                           class="action-btn download-btn" 
+                           title="Download file">
+                            📥
+                        </a>
+                    }
+                    if it.State != download.StateDownloading {
+                        <form hx-post="/dashboard/remove" 
+                              hx-target="#remove-status" 
+                              hx-swap="innerHTML" 
+                              style="display: inline;">
+                            <input type="hidden" name="id" value={ it.ID } />
+                            <button type="submit" 
+                                    class="action-btn remove-btn" 
+                                    title="Remove from database"
+                                    hx-confirm="Are you sure you want to remove this item?">
+                                🗑️
+                            </button>
+                        </form>
+                    } else {
+                        <button class="action-btn remove-btn disabled" 
+                                title="Cannot remove while downloading" 
+                                disabled>
+                            🗑️
+                        </button>
+                    }
+                </div>
             </td>
         </tr>
     }

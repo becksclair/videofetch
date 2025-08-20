@@ -74,7 +74,7 @@ func main() {
 	mgr.SetHooks(hooks)
 	defer mgr.Shutdown()
 
-	mux := server.New(mgr, st)
+	mux := server.New(mgr, st, absOut)
 
 	addr := fmt.Sprintf("%s:%d", host, port)
 	srv := &http.Server{
@@ -173,6 +173,17 @@ func (h *storeHooks) OnStateChange(dbID int64, state download.State, errMsg stri
 		// Ignore database closure errors during shutdown and context cancellation
 		if !h.isExpectedError(err) {
 			log.Printf("db update status id=%d: %v", dbID, err)
+		}
+	}
+}
+
+func (h *storeHooks) OnFilename(dbID int64, filename string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := h.st.UpdateFilename(ctx, dbID, filename); err != nil {
+		// Ignore database closure errors during shutdown and context cancellation
+		if !h.isExpectedError(err) {
+			log.Printf("db update filename id=%d: %v", dbID, err)
 		}
 	}
 }

@@ -5,4 +5,5 @@ package download
 type Hooks interface {
 	OnProgress(dbID int64, progress float64)
 	OnStateChange(dbID int64, state State, errMsg string)
+	OnFilename(dbID int64, filename string)
 }

@@ -14,7 +14,7 @@ func TestDashboard_HTML_OK(t *testing.T) {
 	h := New(&mockMgr{
 		enqueueFn:  func(url string) (string, error) { return "", nil },
 		snapshotFn: func(id string) []*download.Item { return items },
-	}, nil)
+	}, nil, "/tmp/test")
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
 	req.Header.Set("X-Forwarded-For", "198.51.100.1")
 	w := httptest.NewRecorder()
@@ -36,7 +36,7 @@ func TestDashboard_Rows_OK(t *testing.T) {
 	h := New(&mockMgr{
 		enqueueFn:  func(url string) (string, error) { return "", nil },
 		snapshotFn: func(id string) []*download.Item { return items },
-	}, nil)
+	}, nil, "/tmp/test")
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/rows", nil)
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
 	w := httptest.NewRecorder()
@@ -54,15 +54,18 @@ func TestDashboard_Enqueue_OK_And_Invalid(t *testing.T) {
 	h := New(&mockMgr{
 		enqueueFn:  func(url string) (string, error) { called++; return "newid", nil },
 		snapshotFn: func(id string) []*download.Item { return nil },
-	}, nil)
+	}, nil, "/tmp/test")
 	// Valid submission
 	req := httptest.NewRequest(http.MethodPost, "/dashboard/enqueue", strings.NewReader("url=https%3A%2F%2Fok"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("X-Forwarded-For", "198.51.100.3")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "✓ Video queued successfully") {
+		t.Fatalf("expected success message in response: %q", w.Body.String())
 	}
 	if called != 1 {
 		t.Fatalf("enqueue not called")
