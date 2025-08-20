@@ -85,7 +85,10 @@ VALUES (?, ?, ?, ?, ?, ?)`, url, title, duration, thumbnail, st, progress)
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("get insert id: %w", err)
+	}
 	log.Printf("db: create_download id=%d url=%q title=%q duration=%d status=%s progress=%.1f", id, url, title, duration, st, progress)
 	return id, nil
 }

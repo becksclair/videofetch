@@ -3,6 +3,7 @@ package download
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 type State string
@@ -33,6 +35,14 @@ const (
 // or VIDEOFETCH_YTDLP_FORMAT environment variable. Prefer any best streams to
 // maximize success (may require ffmpeg for merging).
 const defaultYTDLPFormat = "bestvideo*+bestaudio/best"
+
+// Buffer pool for progress parsing to reduce allocations
+var progressBufferPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 4096) // 4KB initial size
+		return &buf
+	},
+}
 
 type Item struct {
 	ID       string  `json:"id"`
@@ -241,75 +251,31 @@ func (m *Manager) runYTDLP(id, url string) error {
 	if err := CheckYTDLP(); err != nil {
 		return fmt.Errorf("yt_dlp_not_found: %w", err)
 	}
-	// Output template
-	outTpl := filepath.Join(m.outDir, "%(title)s-%(id)s.%(ext)s")
-
-	// Helper to run yt-dlp once with given options
-	runOnce := func(format, impersonate string) error {
-		// Align with the Rust example: use a simple, parseable progress template
-		// that emits to stdout lines beginning with "remedia-" and include
-		// downloaded/total/estimate/eta. Also embed metadata/thumbnail/chapters
-		// and continue partially downloaded files.
-		args := []string{
-			"--newline", "--no-color", "--no-playlist",
-			"--progress-template", "download:remedia-%(progress.downloaded_bytes)s-%(progress.total_bytes)s-%(progress.total_bytes_estimate)s-%(progress.eta)s",
-			"--continue",
-			"--embed-thumbnail", "--embed-metadata", "--embed-chapters", "--windows-filenames",
-			"-o", outTpl, url,
+	
+	config := m.getYTDLPConfig()
+	outTpl := filepath.Join(m.outDir, "%(title).200s-%(id)s.%(ext)s")
+	
+	log.Printf("yt-dlp start id=%s url=%s format=%q impersonate=%q output=%s", id, url, config.format, config.impersonate, outTpl)
+	
+	if err := m.runYTDLPOnce(id, url, outTpl, config.format, config.impersonate); err != nil {
+		if shouldFallback(err.Error()) {
+			return m.runWithFallbacks(id, url, outTpl, config.impersonate, err)
 		}
-		if format != "" {
-			base := []string{"-f", format}
-			if len(args) >= 3 {
-				args = append(args[:len(args)-3], append(base, args[len(args)-3:]...)...)
-			} else {
-				args = append(base, args...)
-			}
-		}
-		if impersonate != "" {
-			args = append([]string{"--impersonate", impersonate}, args...)
-		}
-		cmd := exec.Command("yt-dlp", args...)
-
-		// Progress appears on stderr; capture both to be safe and tee into buffers for diagnostics.
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			return fmt.Errorf("stderr: %w", err)
-		}
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return fmt.Errorf("stdout: %w", err)
-		}
-		var stderrBuf, stdoutBuf bytes.Buffer
-
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("start: %w", err)
-		}
-
-		// Read progress concurrently.
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			m.parseProgress(id, bufio.NewScanner(io.TeeReader(stderr, &stderrBuf)))
-		}()
-		go func() {
-			defer wg.Done()
-			m.parseProgress(id, bufio.NewScanner(io.TeeReader(stdout, &stdoutBuf)))
-		}()
-		wg.Wait()
-
-		if err := cmd.Wait(); err != nil {
-			// Include tail of stderr for better diagnostics
-			tail := tailString(stderrBuf.String(), 512)
-			if tail != "" {
-				return fmt.Errorf("yt-dlp: %w: %s", err, tail)
-			}
-			return fmt.Errorf("yt-dlp: %w", err)
-		}
-		return nil
+		return err
 	}
+	
+	log.Printf("yt-dlp success id=%s url=%s format=%q impersonate=%q", id, url, config.format, config.impersonate)
+	return nil
+}
 
-	// Initial selection precedence: Manager field > env > default
+// ytdlpConfig holds configuration for yt-dlp execution
+type ytdlpConfig struct {
+	format      string
+	impersonate string
+}
+
+// getYTDLPConfig resolves format and impersonation settings from various sources
+func (m *Manager) getYTDLPConfig() ytdlpConfig {
 	format := m.ytdlpFormat
 	if format == "" {
 		format = os.Getenv("VIDEOFETCH_YTDLP_FORMAT")
@@ -317,69 +283,153 @@ func (m *Manager) runYTDLP(id, url string) error {
 	if format == "" {
 		format = defaultYTDLPFormat
 	}
-	imp := m.ytdlpImpersonate
-	if imp == "" {
-		imp = os.Getenv("VIDEOFETCH_YTDLP_IMPERSONATE")
+	
+	impersonate := m.ytdlpImpersonate
+	if impersonate == "" {
+		impersonate = os.Getenv("VIDEOFETCH_YTDLP_IMPERSONATE")
 	}
+	
+	return ytdlpConfig{format: format, impersonate: impersonate}
+}
 
-	log.Printf("yt-dlp start id=%s url=%s format=%q impersonate=%q output=%s", id, url, format, imp, outTpl)
-	if err := runOnce(format, imp); err != nil {
-		emsg := err.Error()
-		if shouldFallback(emsg) {
-			// Try a sequence of safer formats. First allow merging of best video+audio
-			// (requires ffmpeg). Then try common progressive/pre-merged fallbacks.
-			fallbackFormats := []string{
-				"bestvideo*+bestaudio/best",
-				"22/18/b",
-				"b/18",
-			}
-			for _, ff := range fallbackFormats {
-				fbImp := imp
-				if fbImp == "" {
-					fbImp = detectBestImpersonation()
-				}
-				log.Printf("yt-dlp failed for %s; retrying with fallback: -f %q --impersonate %q", id, ff, fbImp)
-				if err2 := runOnce(ff, fbImp); err2 != nil {
-					lower := strings.ToLower(err2.Error())
-					// If impersonation isn't supported in this environment, retry without it
-					if strings.Contains(lower, "impersonate target") {
-						log.Printf("impersonation %q unavailable; retrying fallback without impersonation", fbImp)
-						if err3 := runOnce(ff, ""); err3 == nil {
-							log.Printf("yt-dlp success id=%s format=%q impersonate=%q (fallback no-imp)", id, ff, "")
-							return nil
-						} else {
-							// continue to next fallback
-							continue
-						}
-					}
-					// If merging failed due to missing ffmpeg, try next (likely pre-merged)
-					if strings.Contains(lower, "ffmpeg") || strings.Contains(lower, "post-processing") {
-						continue
-					}
-					// If still hitting provider restrictions, continue to next fallback
-					if shouldFallback(lower) {
-						continue
-					}
-					// For other errors, abort early
-					return err2
-				} else {
-					log.Printf("yt-dlp success id=%s format=%q impersonate=%q (fallback)", id, ff, fbImp)
-					return nil
-				}
-			}
-			// All fallbacks failed; return last error from initial attempt
-			return fmt.Errorf("yt-dlp: all fallbacks failed: %s", tailString(emsg, 256))
-		}
-		return err
+// runYTDLPOnce executes yt-dlp with specified parameters
+func (m *Manager) runYTDLPOnce(id, url, outTpl, format, impersonate string) error {
+	args := m.buildYTDLPArgs(outTpl, url, format, impersonate)
+	cmd := exec.Command("yt-dlp", args...)
+	
+	return m.executeWithProgressTracking(id, cmd)
+}
+
+// buildYTDLPArgs constructs the argument list for yt-dlp
+func (m *Manager) buildYTDLPArgs(outTpl, url, format, impersonate string) []string {
+	args := []string{
+		"--newline", "--no-color", "--no-playlist",
+		"--progress-template", "download:remedia-%(progress.downloaded_bytes)s-%(progress.total_bytes)s-%(progress.total_bytes_estimate)s-%(progress.eta)s",
+		"--continue",
+		"--embed-thumbnail", "--embed-metadata", "--embed-chapters",
+		"--windows-filenames", "--restrict-filenames",
+		"-o", outTpl, url,
 	}
-	log.Printf("yt-dlp success id=%s url=%s format=%q impersonate=%q", id, url, format, imp)
+	
+	if format != "" {
+		// Insert format flags before the last 3 arguments (output template and URL)
+		base := []string{"-f", format}
+		if len(args) >= 3 {
+			args = append(args[:len(args)-3], append(base, args[len(args)-3:]...)...)
+		} else {
+			args = append(base, args...)
+		}
+	}
+	
+	if impersonate != "" {
+		args = append([]string{"--impersonate", impersonate}, args...)
+	}
+	
+	return args
+}
+
+// executeWithProgressTracking runs the command and tracks progress
+func (m *Manager) executeWithProgressTracking(id string, cmd *exec.Cmd) error {
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout: %w", err)
+	}
+	
+	var stderrBuf, stdoutBuf bytes.Buffer
+	
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+	
+	// Read progress concurrently
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		m.parseProgress(id, bufio.NewScanner(io.TeeReader(stderr, &stderrBuf)))
+	}()
+	go func() {
+		defer wg.Done()
+		m.parseProgress(id, bufio.NewScanner(io.TeeReader(stdout, &stdoutBuf)))
+	}()
+	wg.Wait()
+	
+	if err := cmd.Wait(); err != nil {
+		tail := tailString(stderrBuf.String(), 512)
+		if tail != "" {
+			return fmt.Errorf("yt-dlp: %w: %s", err, tail)
+		}
+		return fmt.Errorf("yt-dlp: %w", err)
+	}
 	return nil
 }
 
+// runWithFallbacks tries alternative formats when the initial attempt fails
+func (m *Manager) runWithFallbacks(id, url, outTpl, impersonate string, originalErr error) error {
+	fallbackFormats := []string{
+		"bestvideo*+bestaudio/best",
+		"22/18/b",
+		"b/18",
+	}
+	
+	for _, format := range fallbackFormats {
+		fbImp := impersonate
+		if fbImp == "" {
+			fbImp = detectBestImpersonation()
+		}
+		
+		log.Printf("yt-dlp failed for %s; retrying with fallback: -f %q --impersonate %q", id, format, fbImp)
+		
+		if err := m.runYTDLPOnce(id, url, outTpl, format, fbImp); err != nil {
+			if m.handleFallbackError(id, url, outTpl, format, fbImp, err) {
+				return nil
+			}
+			continue
+		}
+		
+		log.Printf("yt-dlp success id=%s format=%q impersonate=%q (fallback)", id, format, fbImp)
+		return nil
+	}
+	
+	return fmt.Errorf("yt-dlp: all fallbacks failed: %s", tailString(originalErr.Error(), 256))
+}
+
+// handleFallbackError processes errors during fallback attempts
+func (m *Manager) handleFallbackError(id, url, outTpl, format, impersonate string, err error) bool {
+	lower := strings.ToLower(err.Error())
+	
+	// If impersonation isn't supported, retry without it
+	if strings.Contains(lower, "impersonate target") {
+		log.Printf("impersonation %q unavailable; retrying fallback without impersonation", impersonate)
+		if err3 := m.runYTDLPOnce(id, url, outTpl, format, ""); err3 == nil {
+			log.Printf("yt-dlp success id=%s format=%q impersonate=%q (fallback no-imp)", id, format, "")
+			return true
+		}
+	}
+	
+	// Continue to next fallback for these error types
+	if strings.Contains(lower, "ffmpeg") || strings.Contains(lower, "post-processing") {
+		return false
+	}
+	if shouldFallback(lower) {
+		return false
+	}
+	
+	// For other errors, we might want to abort early but let's continue for now
+	return false
+}
+
 func (m *Manager) parseProgress(id string, sc *bufio.Scanner) {
-	// Increase buffer to handle long lines
-	buf := make([]byte, 0, 64*1024)
-	sc.Buffer(buf, 1024*1024)
+	// Use buffer pool to reduce allocations
+	bufPtr := progressBufferPool.Get().(*[]byte)
+	defer progressBufferPool.Put(bufPtr)
+	
+	// Set a reasonable max buffer size (256KB)
+	sc.Buffer(*bufPtr, 256*1024)
 	// Split on either \n, \r\n, or bare \r since yt-dlp often rewrites
 	// progress on the same line using carriage returns.
 	sc.Split(scanCRorLF)
@@ -550,7 +600,11 @@ func (m *Manager) updateProgress(id string, p float64) {
 			if it.DBID > 0 && m.hooks != nil {
 				dbid := it.DBID
 				prog := it.Progress
-				go m.hooks.OnProgress(dbid, prog)
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					m.callHookWithTimeout(ctx, func() { m.hooks.OnProgress(dbid, prog) })
+				}()
 			}
 		}
 	}
@@ -568,7 +622,11 @@ func (m *Manager) updateState(id string, st State, errMsg string) {
 			dbid := it.DBID
 			state := st
 			errStr := errMsg
-			go m.hooks.OnStateChange(dbid, state, errStr)
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				m.callHookWithTimeout(ctx, func() { m.hooks.OnStateChange(dbid, state, errStr) })
+			}()
 		}
 	}
 	m.mu.Unlock()
@@ -576,10 +634,8 @@ func (m *Manager) updateState(id string, st State, errMsg string) {
 
 func (m *Manager) updateFailure(id string, err error) {
 	msg := err.Error()
-	// reduce noise from long command errors
-	if len(msg) > 512 {
-		msg = msg[:512]
-	}
+	// reduce noise from long command errors, respecting UTF-8 boundaries
+	msg = truncateUTF8(msg, 512)
 	m.updateState(id, StateFailed, msg)
 }
 
@@ -601,6 +657,40 @@ func tailString(s string, n int) string {
 		return strings.TrimSpace(s)
 	}
 	return strings.TrimSpace(s[len(s)-n:])
+}
+
+// truncateUTF8 truncates a string to at most n bytes while preserving UTF-8 validity
+func truncateUTF8(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	// Find the last valid UTF-8 boundary within n bytes
+	for i := n; i >= 0; i-- {
+		if utf8.ValidString(s[:i]) {
+			return s[:i]
+		}
+	}
+	// Fallback: empty string if no valid UTF-8 found
+	return ""
+}
+
+// callHookWithTimeout executes a hook function with context timeout protection
+func (m *Manager) callHookWithTimeout(ctx context.Context, fn func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-ctx.Done():
+		// Hook timed out, but we can't cancel it - just log and continue
+		log.Printf("hook call timed out")
+	case <-done:
+		// Hook completed successfully
+	}
 }
 
 // shouldFallback returns true if the error text suggests we should retry with

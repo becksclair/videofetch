@@ -3,16 +3,17 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"fmt"
 	"videofetch/internal/download"
 	"videofetch/internal/store"
 	"videofetch/internal/ui"
@@ -308,15 +309,10 @@ func New(mgr downloadManager, st *store.Store) http.Handler {
 					less = nil
 				}
 				if less != nil {
-					for i := 1; i < len(items); i++ {
-						for j := i; j > 0 && less(j, j-1); j-- {
-							items[j], items[j-1] = items[j-1], items[j]
-						}
-					}
 					if order == "desc" {
-						for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
-							items[i], items[j] = items[j], items[i]
-						}
+						sort.Slice(items, func(i, j int) bool { return less(j, i) })
+					} else {
+						sort.Slice(items, less)
 					}
 				}
 			}
@@ -460,11 +456,12 @@ func clientIP(r *http.Request) string {
 
 // Simple token bucket per IP with fixed refill interval and capacity.
 type ipRateLimiter struct {
-	cap     int
-	refill  time.Duration
-	buckets map[string]*bucket
-	// protect buckets
-	mu sync.Mutex
+	cap       int
+	refill    time.Duration
+	buckets   map[string]*bucket
+	mu        sync.Mutex
+	cleanupTicker *time.Ticker
+	stopCleanup   chan struct{}
 }
 
 type bucket struct {
@@ -473,7 +470,53 @@ type bucket struct {
 }
 
 func newIPRateLimiter(cap int, refill time.Duration) *ipRateLimiter {
-	return &ipRateLimiter{cap: cap, refill: refill, buckets: make(map[string]*bucket)}
+	rl := &ipRateLimiter{
+		cap:           cap,
+		refill:        refill,
+		buckets:       make(map[string]*bucket),
+		cleanupTicker: time.NewTicker(time.Hour), // cleanup every hour
+		stopCleanup:   make(chan struct{}),
+	}
+	// Start cleanup goroutine
+	go rl.cleanupLoop()
+	return rl
+}
+
+// cleanupLoop removes stale buckets to prevent memory leaks
+func (rl *ipRateLimiter) cleanupLoop() {
+	for {
+		select {
+		case <-rl.cleanupTicker.C:
+			rl.cleanup()
+		case <-rl.stopCleanup:
+			rl.cleanupTicker.Stop()
+			return
+		}
+	}
+}
+
+// cleanup removes buckets that haven't been used for 24 hours
+func (rl *ipRateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for ip, bucket := range rl.buckets {
+		if bucket.last.Before(cutoff) {
+			delete(rl.buckets, ip)
+		}
+	}
+}
+
+// Stop stops the cleanup goroutine
+func (rl *ipRateLimiter) Stop() {
+	select {
+	case <-rl.stopCleanup:
+		// Already stopped
+		return
+	default:
+		close(rl.stopCleanup)
+	}
 }
 
 func (rl *ipRateLimiter) Allow(key string) bool {

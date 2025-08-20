@@ -38,7 +38,7 @@ func main() {
 	flag.IntVar(&queueCap, "queue", 128, "Download queue capacity")
 	flag.StringVar(&ytdlpFormat, "yt-dlp-format", "bestvideo*+bestaudio/best", "yt-dlp format selector (-f). Overrides VIDEOFETCH_YTDLP_FORMAT if set.")
 	flag.StringVar(&ytdlpImpersonate, "yt-dlp-impersonate", "", "yt-dlp --impersonate client (e.g., 'chrome' or 'chrome:windows-10'). Overrides VIDEOFETCH_YTDLP_IMPERSONATE if set.")
-	flag.StringVar(&dbPath, "db", "", "Path to SQLite database (default: OS cache dir: videofetch/videofectch.db)")
+	flag.StringVar(&dbPath, "db", "", "Path to SQLite database (default: OS cache dir: videofetch/videofetch.db)")
 	flag.Parse()
 
 	if outputDir == "" {
@@ -135,26 +135,26 @@ func (h *storeHooks) OnProgress(dbID int64, progress float64) {
 
 // defaultCacheDBPath returns the cross-platform default path for the SQLite DB
 // as requested:
-// - Windows: %APPDATA%/videofetch/videofectch.db
-// - Linux/macOS: $HOME/.cache/videofetch/videofectch.db
+// - Windows: %APPDATA%/videofetch/videofetch.db
+// - Linux/macOS: $HOME/.cache/videofetch/videofetch.db
 func defaultCacheDBPath() string {
 	if runtime.GOOS == "windows" {
 		if appdata := os.Getenv("APPDATA"); appdata != "" {
-			return filepath.Join(appdata, "videofetch", "videofectch.db")
+			return filepath.Join(appdata, "videofetch", "videofetch.db")
 		}
 		// Fallback to user home if APPDATA is not set
 		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, "AppData", "Roaming", "videofetch", "videofectch.db")
+			return filepath.Join(home, "AppData", "Roaming", "videofetch", "videofetch.db")
 		}
 		// Last resort: current directory
-		return "videofectch.db"
+		return "videofetch.db"
 	}
 	// Linux/macOS default cache location
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cache", "videofetch", "videofectch.db")
+		return filepath.Join(home, ".cache", "videofetch", "videofetch.db")
 	}
 	// Fallback: place in working directory
-	return filepath.Join("videofetch", "videofectch.db")
+	return filepath.Join("videofetch", "videofetch.db")
 }
 
 func (h *storeHooks) OnStateChange(dbID int64, state download.State, errMsg string) {
