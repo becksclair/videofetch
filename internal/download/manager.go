@@ -2,15 +2,20 @@ package download
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +30,11 @@ const (
 	StateCompleted   State = "completed"
 	StateFailed      State = "failed"
 )
+
+// Default yt-dlp format selection used when none is specified via Manager
+// or VIDEOFETCH_YTDLP_FORMAT environment variable. Prefer any best streams to
+// maximize success (may require ffmpeg for merging).
+const defaultYTDLPFormat = "bestvideo*+bestaudio/best"
 
 type Item struct {
 	ID       string  `json:"id"`
@@ -51,10 +61,34 @@ type Manager struct {
 
 	mu        sync.RWMutex
 	downloads map[string]*Item
+
+	// optional yt-dlp format selector (passed as -f). If empty, falls back to
+	// env var VIDEOFETCH_YTDLP_FORMAT and then to a built-in default.
+	ytdlpFormat string
+
+	// optional yt-dlp impersonation client (passed as --impersonate). If empty,
+	// falls back to env var VIDEOFETCH_YTDLP_IMPERSONATE; if still empty, not set.
+	ytdlpImpersonate string
 }
 
 // NewManager creates a download manager with a worker pool and a bounded queue.
 func NewManager(outputDir string, workers, queueCap int) *Manager {
+	return NewManagerWithOptions(outputDir, workers, queueCap, ManagerOptions{})
+}
+
+// ManagerOptions configures yt-dlp invocation behavior.
+type ManagerOptions struct {
+	Format      string
+	Impersonate string
+}
+
+// NewManagerWithFormat is like NewManager but allows specifying a yt-dlp format selector.
+func NewManagerWithFormat(outputDir string, workers, queueCap int, ytdlpFormat string) *Manager {
+	return NewManagerWithOptions(outputDir, workers, queueCap, ManagerOptions{Format: ytdlpFormat})
+}
+
+// NewManagerWithOptions allows specifying format and impersonation.
+func NewManagerWithOptions(outputDir string, workers, queueCap int, opts ManagerOptions) *Manager {
 	if workers <= 0 {
 		workers = max(runtime.NumCPU(), 1)
 	}
@@ -62,9 +96,11 @@ func NewManager(outputDir string, workers, queueCap int) *Manager {
 		queueCap = 64
 	}
 	m := &Manager{
-		outDir:    outputDir,
-		jobs:      make(chan job, queueCap),
-		downloads: make(map[string]*Item, queueCap*2),
+		outDir:           outputDir,
+		jobs:             make(chan job, queueCap),
+		downloads:        make(map[string]*Item, queueCap*2),
+		ytdlpFormat:      opts.Format,
+		ytdlpImpersonate: opts.Impersonate,
 	}
 	for i := 0; i < workers; i++ {
 		m.wg.Add(1)
@@ -145,8 +181,21 @@ func (m *Manager) worker(idx int) {
 
 // CheckYTDLP ensures yt-dlp is in PATH.
 func CheckYTDLP() error {
-	_, err := exec.LookPath("yt-dlp")
-	return err
+	// Ensure yt-dlp exists
+	p, err := exec.LookPath("yt-dlp")
+	if err != nil {
+		return err
+	}
+	// Ensure it supports --progress-template so our parser remains stable.
+	// If the flag is not supported, yt-dlp --help will not contain it.
+	out, err := exec.Command(p, "--help").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("yt-dlp not runnable: %w", err)
+	}
+	if !strings.Contains(string(out), "--progress-template") {
+		return fmt.Errorf("yt_dlp_outdated: missing --progress-template support")
+	}
+	return nil
 }
 
 // runYTDLP invokes yt-dlp and parses progress output to update the item.
@@ -157,39 +206,128 @@ func (m *Manager) runYTDLP(id, url string) error {
 	}
 	// Output template
 	outTpl := filepath.Join(m.outDir, "%(title)s-%(id)s.%(ext)s")
-	// --newline prints a new line for progress updates; progress is on stderr.
-	args := []string{"--newline", "--no-color", "--no-playlist", "-o", outTpl, url}
-	cmd := exec.Command("yt-dlp", args...)
 
-	// Progress appears on stderr; capture both to be safe.
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("stderr: %w", err)
+	// Helper to run yt-dlp once with given options
+	runOnce := func(format, impersonate string) error {
+		// --newline prints a new line for progress updates; progress is on stderr.
+		// Use a custom progress template to emit a stable, machine-parseable prefix.
+		// We only parse lines that contain the "VFPROG" token.
+		args := []string{
+			"--newline", "--no-color", "--no-playlist", "--progress-delta", "0.5",
+			"--progress-template", "download:VFPROG {\"p\":\"%(progress._percent_str)s\",\"st\":\"%(progress.status)s\",\"d\":%(progress.downloaded_bytes)s,\"t\":%(progress.total_bytes)s,\"te\":%(progress.total_bytes_estimate)s,\"s\":%(progress.speed)s,\"e\":%(progress.eta)s}",
+			"-o", outTpl, url,
+		}
+		if format != "" {
+			base := []string{"-f", format}
+			if len(args) >= 3 {
+				args = append(args[:len(args)-3], append(base, args[len(args)-3:]...)...)
+			} else {
+				args = append(base, args...)
+			}
+		}
+		if impersonate != "" {
+			args = append([]string{"--impersonate", impersonate}, args...)
+		}
+		cmd := exec.Command("yt-dlp", args...)
+
+		// Progress appears on stderr; capture both to be safe and tee into buffers for diagnostics.
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return fmt.Errorf("stderr: %w", err)
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return fmt.Errorf("stdout: %w", err)
+		}
+		var stderrBuf, stdoutBuf bytes.Buffer
+
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("start: %w", err)
+		}
+
+		// Read progress concurrently.
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			m.parseProgress(id, bufio.NewScanner(io.TeeReader(stderr, &stderrBuf)))
+		}()
+		go func() {
+			defer wg.Done()
+			m.parseProgress(id, bufio.NewScanner(io.TeeReader(stdout, &stdoutBuf)))
+		}()
+		wg.Wait()
+
+		if err := cmd.Wait(); err != nil {
+			// Include tail of stderr for better diagnostics
+			tail := tailString(stderrBuf.String(), 512)
+			if tail != "" {
+				return fmt.Errorf("yt-dlp: %w: %s", err, tail)
+			}
+			return fmt.Errorf("yt-dlp: %w", err)
+		}
+		return nil
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout: %w", err)
+
+	// Initial selection precedence: Manager field > env > default
+	format := m.ytdlpFormat
+	if format == "" {
+		format = os.Getenv("VIDEOFETCH_YTDLP_FORMAT")
+	}
+	if format == "" {
+		format = defaultYTDLPFormat
+	}
+	imp := m.ytdlpImpersonate
+	if imp == "" {
+		imp = os.Getenv("VIDEOFETCH_YTDLP_IMPERSONATE")
 	}
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start: %w", err)
-	}
-
-	// Read progress concurrently.
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		m.parseProgress(id, bufio.NewScanner(stderr))
-	}()
-	go func() {
-		defer wg.Done()
-		m.parseProgress(id, bufio.NewScanner(stdout))
-	}()
-	wg.Wait()
-
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("yt-dlp: %w", err)
+	if err := runOnce(format, imp); err != nil {
+		emsg := err.Error()
+		if shouldFallback(emsg) {
+			// Try a sequence of safer formats. First allow merging of best video+audio
+			// (requires ffmpeg). Then try common progressive/pre-merged fallbacks.
+			fallbackFormats := []string{
+				"bestvideo*+bestaudio/best",
+				"22/18/b",
+				"b/18",
+			}
+			for _, ff := range fallbackFormats {
+				fbImp := imp
+				if fbImp == "" {
+					fbImp = detectBestImpersonation()
+				}
+				log.Printf("yt-dlp failed for %s; retrying with fallback: -f %q --impersonate %q", id, ff, fbImp)
+				if err2 := runOnce(ff, fbImp); err2 != nil {
+					lower := strings.ToLower(err2.Error())
+					// If impersonation isn't supported in this environment, retry without it
+					if strings.Contains(lower, "impersonate target") {
+						log.Printf("impersonation %q unavailable; retrying fallback without impersonation", fbImp)
+						if err3 := runOnce(ff, ""); err3 == nil {
+							return nil
+						} else {
+							// continue to next fallback
+							continue
+						}
+					}
+					// If merging failed due to missing ffmpeg, try next (likely pre-merged)
+					if strings.Contains(lower, "ffmpeg") || strings.Contains(lower, "post-processing") {
+						continue
+					}
+					// If still hitting provider restrictions, continue to next fallback
+					if shouldFallback(lower) {
+						continue
+					}
+					// For other errors, abort early
+					return err2
+				} else {
+					return nil
+				}
+			}
+			// All fallbacks failed; return last error from initial attempt
+			return fmt.Errorf("yt-dlp: all fallbacks failed: %s", tailString(emsg, 256))
+		}
+		return err
 	}
 	return nil
 }
@@ -200,23 +338,95 @@ func (m *Manager) parseProgress(id string, sc *bufio.Scanner) {
 	// Increase buffer to handle long lines
 	buf := make([]byte, 0, 64*1024)
 	sc.Buffer(buf, 1024*1024)
+	// Split on either \n, \r\n, or bare \r since yt-dlp often rewrites
+	// progress on the same line using carriage returns.
+	sc.Split(scanCRorLF)
 	for sc.Scan() {
 		line := sc.Text()
-		// Quick path: only update on lines that look like progress
-		if !strings.Contains(line, "%") {
+		// Only parse our custom progress-template lines
+		if !strings.Contains(line, "VFPROG") {
 			continue
 		}
-		match := percentRe.FindStringSubmatch(line)
-		if len(match) >= 2 {
-			p := parsePercent(match[1])
-			if p >= 0 && p <= 100 {
+		// Extract JSON after the marker
+		idx := strings.Index(line, "VFPROG")
+		if idx < 0 {
+			continue
+		}
+		js := strings.TrimSpace(line[idx+len("VFPROG"):])
+		// Some builds may prefix with ':' or ' ' - trim leading separators
+		js = strings.TrimLeft(js, " :")
+		var ev struct {
+			P  string `json:"p"`
+			St string `json:"st"`
+		}
+		if err := json.Unmarshal([]byte(js), &ev); err != nil {
+			// fallback: try to find percentage via regex
+			if matches := percentRe.FindStringSubmatch(line); len(matches) >= 2 {
+				if p := parsePercent(matches[1]); p >= 0 && p <= 100 {
+					// Avoid prematurely setting 100%; final 100 is set when the process completes.
+					if p >= 100 {
+						p = 99
+					}
+					m.updateProgress(id, p)
+				}
+			}
+			continue
+		}
+		// Parse ev.P, e.g., "  34.5%" or "N/A"
+		ps := strings.TrimSpace(ev.P)
+		if strings.HasSuffix(ps, "%") {
+			ps = strings.TrimSuffix(ps, "%")
+			if p := parsePercent(ps); p >= 0 && p <= 100 {
+				// Avoid prematurely setting 100%; final 100 is set when the process completes.
+				if p >= 100 {
+					p = 99
+				}
 				m.updateProgress(id, p)
+				continue
 			}
 		}
+		// Do not force to 100 on intermediary "finished" messages (e.g., per-stream).
 	}
 	if err := sc.Err(); err != nil {
 		log.Printf("progress scan error for %s: %v", id, err)
 	}
+}
+
+// scanCRorLF is like bufio.ScanLines but treats a bare '\r' as a line
+// terminator as well. It also handles CRLF and strips a trailing CR.
+func scanCRorLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	// If at EOF and no data, return no token
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	// Search for newline or carriage return
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\n' {
+			// Return the line without the trailing CR, if present
+			line := data[:i]
+			if i > 0 && data[i-1] == '\r' {
+				line = data[:i-1]
+			}
+			return i + 1, line, nil
+		}
+		if data[i] == '\r' {
+			// If CRLF, consume both; else just CR
+			if i+1 < len(data) && data[i+1] == '\n' {
+				return i + 2, data[:i], nil
+			}
+			return i + 1, data[:i], nil
+		}
+	}
+	// If at EOF, return the remaining data.
+	if atEOF {
+		// Drop a trailing CR, if any
+		if len(data) > 0 && data[len(data)-1] == '\r' {
+			return len(data), data[:len(data)-1], nil
+		}
+		return len(data), data, nil
+	}
+	// Request more data.
+	return 0, nil, nil
 }
 
 func parsePercent(s string) float64 {
@@ -290,4 +500,106 @@ func genID() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
+}
+
+// tailString returns the last at most n bytes from s (by rune boundary best-effort).
+func tailString(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return strings.TrimSpace(s)
+	}
+	return strings.TrimSpace(s[len(s)-n:])
+}
+
+// shouldFallback returns true if the error text suggests we should retry with
+// simpler/pre-merged formats and a more permissive client impersonation.
+func shouldFallback(errText string) bool {
+	et := strings.ToLower(errText)
+	if strings.Contains(et, "http error 403") {
+		return true
+	}
+	if strings.Contains(et, "fragment 1 not found") {
+		return true
+	}
+	if strings.Contains(et, "requested format is not available") {
+		return true
+	}
+	// Generic "unable to continue" often accompanies the above
+	if strings.Contains(et, "unable to continue") {
+		return true
+	}
+	return false
+}
+
+// detectBestImpersonation inspects yt-dlp's available impersonation targets and
+// returns a preferred target string (e.g., "chrome-131:windows-10"). Returns
+// empty string if detection fails.
+func detectBestImpersonation() string {
+	out, err := exec.Command("yt-dlp", "--list-impersonate-targets").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(out), "\n")
+	type cand struct {
+		ver        int
+		os, client string
+	}
+	bestRank := -1
+	bestVer := -1
+	var best cand
+	// Preference order for OS
+	rankOS := func(os string) int {
+		os = strings.ToLower(os)
+		switch os {
+		case "windows-10":
+			return 5
+		case "macos-15":
+			return 4
+		case "macos-14":
+			return 3
+		case "android-14":
+			return 2
+		default:
+			return 1
+		}
+	}
+	for _, ln := range lines {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "[") || strings.HasPrefix(ln, "Client") || strings.HasPrefix(ln, "-") {
+			continue
+		}
+		// Expect columns: Client  OS  Source
+		fields := strings.Fields(ln)
+		if len(fields) < 2 {
+			continue
+		}
+		client := strings.ToLower(fields[0]) // e.g., chrome-131
+		osName := strings.ToLower(fields[1]) // e.g., windows-10
+		if !strings.HasPrefix(client, "chrome") {
+			continue
+		}
+		ver := 0
+		if i := strings.Index(client, "-"); i >= 0 && i+1 < len(client) {
+			if n, err := strconv.Atoi(client[i+1:]); err == nil {
+				ver = n
+			}
+		}
+		r := rankOS(osName)
+		if r > bestRank || (r == bestRank && ver > bestVer) {
+			bestRank = r
+			bestVer = ver
+			best = cand{ver: ver, os: osName, client: client}
+		}
+	}
+	if bestRank <= 0 {
+		return ""
+	}
+	// Compose as "chrome-<ver>:<os>" if version known; else "chrome:<os>"
+	base := "chrome"
+	if best.ver > 0 {
+		base = fmt.Sprintf("chrome-%d", best.ver)
+	}
+	return fmt.Sprintf("%s:%s", base, best.os)
 }

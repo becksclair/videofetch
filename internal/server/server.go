@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"videofetch/internal/download"
+	"videofetch/internal/ui"
 )
 
 type downloadManager interface {
@@ -99,6 +101,79 @@ func New(mgr downloadManager) http.Handler {
 		id := r.URL.Query().Get("id")
 		items := mgr.Snapshot(id)
 		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "downloads": items})
+	}))
+
+	// Dashboard (HTML via Templ + HTMX)
+	mux.HandleFunc("/", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" && r.URL.Path != "/dashboard" {
+			// Let other handlers handle or 404; fallthrough by returning
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+			return
+		}
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		items := mgr.Snapshot("")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = ui.Dashboard(items).Render(context.Background(), w)
+	}))
+
+	mux.HandleFunc("/dashboard", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		items := mgr.Snapshot("")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = ui.Dashboard(items).Render(context.Background(), w)
+	}))
+
+	mux.HandleFunc("/dashboard/rows", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		items := mgr.Snapshot("")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = ui.QueueTable(items).Render(context.Background(), w)
+	}))
+
+	mux.HandleFunc("/dashboard/enqueue", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("invalid form"))
+			return
+		}
+		u := strings.TrimSpace(r.Form.Get("url"))
+		if !validURL(u) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("invalid url"))
+			return
+		}
+		if _, err := mgr.Enqueue(u); err != nil {
+			// Map known errors to user-facing messages
+			switch err.Error() {
+			case "queue_full":
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte("queue full"))
+				return
+			case "shutting_down":
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("shutting down"))
+			default:
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte("internal error"))
+				return
+			}
+		}
+		// Redirect back to dashboard so the HTMX poll refreshes
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 	}))
 
 	// Healthcheck

@@ -19,11 +19,13 @@ import (
 
 func main() {
 	var (
-		outputDir string
-		port      int
-		host      string
-		workers   int
-		queueCap  int
+		outputDir        string
+		port             int
+		host             string
+		workers          int
+		queueCap         int
+		ytdlpFormat      string
+		ytdlpImpersonate string
 	)
 
 	flag.StringVar(&outputDir, "output-dir", "", "Directory for downloaded videos (required)")
@@ -31,6 +33,8 @@ func main() {
 	flag.StringVar(&host, "host", "0.0.0.0", "Host address to bind")
 	flag.IntVar(&workers, "workers", 4, "Number of concurrent download workers")
 	flag.IntVar(&queueCap, "queue", 128, "Download queue capacity")
+	flag.StringVar(&ytdlpFormat, "yt-dlp-format", "bestvideo*+bestaudio/best", "yt-dlp format selector (-f). Overrides VIDEOFETCH_YTDLP_FORMAT if set.")
+	flag.StringVar(&ytdlpImpersonate, "yt-dlp-impersonate", "", "yt-dlp --impersonate client (e.g., 'chrome' or 'chrome:windows-10'). Overrides VIDEOFETCH_YTDLP_IMPERSONATE if set.")
 	flag.Parse()
 
 	if outputDir == "" {
@@ -49,7 +53,8 @@ func main() {
 		log.Fatalf("yt-dlp not found: %v", err)
 	}
 
-	mgr := download.NewManager(absOut, workers, queueCap)
+	// CLI flags take precedence; if empty, Manager falls back to env and then defaults
+	mgr := download.NewManagerWithOptions(absOut, workers, queueCap, download.ManagerOptions{Format: ytdlpFormat, Impersonate: ytdlpImpersonate})
 	defer mgr.Shutdown()
 
 	mux := server.New(mgr)
