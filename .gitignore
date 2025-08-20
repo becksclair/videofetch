@@ -295,3 +295,4 @@ modules.xml
 !/videofetch/
 node_modules
 .claude/settings.local.json
+static/style.css
