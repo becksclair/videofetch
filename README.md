@@ -6,12 +6,19 @@ Go-based web service for downloading videos via `yt-dlp` with a simple REST API,
 
 - Go 1.25+
 - `yt-dlp` installed and available on `PATH`
+  - Requires a recent version supporting `--progress-template` (for stable progress parsing).
 
 ## Run
 
 ```shell
 go build -o videofetch ./cmd/videofetch
 ./videofetch --output-dir /path/to/downloads --port 8080 --host 0.0.0.0
+
+# Optional: control yt-dlp behavior via env instead of CLI flags:
+#   export VIDEOFETCH_YTDLP_FORMAT='bestvideo*+bestaudio/best'
+#   export VIDEOFETCH_YTDLP_FORMAT='bestvideo*[ext=mp4]+bestaudio[ext=m4a]/best'
+#   export VIDEOFETCH_YTDLP_IMPERSONATE='chrome'
+# Then run the server as above.
 ```
 
 Flags:
@@ -19,6 +26,10 @@ Flags:
 - `--output-dir` (required): output directory for downloads (created if missing)
 - `--port` (default: `8080`)
 - `--host` (default: `0.0.0.0`)
+- `--yt-dlp-format` (default: `bestvideo*+bestaudio/best`):
+  yt-dlp format selector passed as `-f`. CLI flag overrides `VIDEOFETCH_YTDLP_FORMAT`.
+- `--yt-dlp-impersonate` (default: empty): yt-dlp `--impersonate` client, e.g.,
+  `chrome` or `chrome:windows-10`. CLI flag overrides `VIDEOFETCH_YTDLP_IMPERSONATE`.
 
 ## API
 
@@ -101,3 +112,18 @@ Response:
   - Options:
     - Single URL override: `INTEGRATION_URL=https://...`
     - Batch URLs override: `INTEGRATION_URLS="https://u1, https://u2 ..."`
+  - Notes: Some providers (e.g., YouTube) may restrict certain formats; if you
+    observe `yt-dlp: exit status 1` errors, try overriding the format using
+    `--yt-dlp-format`/`VIDEOFETCH_YTDLP_FORMAT` and/or impersonating a browser via
+    `--yt-dlp-impersonate chrome` or `VIDEOFETCH_YTDLP_IMPERSONATE=chrome`.
+
+## Dashboard (Templ + HTMX)
+
+- Visit `http://HOST:PORT/dashboard` (or `/`) for a simple dashboard.
+- Includes an enqueue form and a live-updating queue table (polls every 1s).
+- Server-rendered using `github.com/a-h/templ`, updated via HTMX; no client build step.
+  - Progress parsing uses yt-dlp `--progress-template` with a custom marker for robust updates.
+
+Dev notes:
+- The generated Go from `.templ` is committed. If you modify templates, regenerate with:
+  - `make tools` (one-time) then `make generate`

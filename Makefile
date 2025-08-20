@@ -6,9 +6,9 @@ HOST ?= 0.0.0.0
 PORT ?= 8080
 OUTPUT_DIR ?= ./downloads
 
-.PHONY: build test run
+.PHONY: build test run generate tools
 
-build:
+build: generate
 	go build -o $(BIN) $(CMD)
 
 test:
@@ -19,3 +19,11 @@ run: build
 	@mkdir -p $(OUTPUT_DIR)
 	./$(BIN) --output-dir $(OUTPUT_DIR) --host $(HOST) --port $(PORT)
 
+# Generate Templ components (optional for development)
+generate:
+	@command -v templ >/dev/null 2>&1 || { echo "templ not found; run 'make tools' first" >&2; exit 1; }
+	templ generate
+
+# Install codegen tools
+tools:
+	go install github.com/a-h/templ/cmd/templ@latest
