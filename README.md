@@ -14,9 +14,6 @@ Go-based web service for downloading videos via `yt-dlp` with a simple REST API,
 go build -o videofetch ./cmd/videofetch
 ./videofetch --output-dir ./downloads --port 8080 --host 0.0.0.0
 
-# Optional: control yt-dlp via env instead of flags
-# export VIDEOFETCH_YTDLP_FORMAT='bestvideo*+bestaudio/best'
-# export VIDEOFETCH_YTDLP_IMPERSONATE='chrome'  # or 'chrome:windows-10'
 ```
 
 ## CLI flags
@@ -26,11 +23,9 @@ go build -o videofetch ./cmd/videofetch
 - `--host` (default: `0.0.0.0`)
 - `--workers` (default: `4`): concurrent download workers
 - `--queue` (default: `128`): queue capacity (backpressure)
-- `--yt-dlp-format` (default: `bestvideo*+bestaudio/best`): passed to yt-dlp as `-f`; overrides `VIDEOFETCH_YTDLP_FORMAT`
-- `--yt-dlp-impersonate` (default: empty): passed to yt-dlp as `--impersonate`; overrides `VIDEOFETCH_YTDLP_IMPERSONATE`
-- `--db` (optional): SQLite database path; defaults to OS cache dir at `videofetch/videofectch.db`
-  - Windows: `%APPDATA%/videofetch/videofectch.db`
-  - Linux/macOS: `$HOME/.cache/videofetch/videofectch.db`
+- `--db` (optional): SQLite database path; defaults to OS cache dir at `videofetch/videofetch.db`
+  - Windows: `%APPDATA%/videofetch/videofetch.db`
+  - Linux/macOS: `$HOME/.cache/videofetch/videofetch.db`
 
 Notes:
 
@@ -42,6 +37,8 @@ Notes:
 Base URL: `http://HOST:PORT`
 
 ### POST `/api/download_single`
+
+Enqueue a single video URL for download. Automatically fetches video metadata (title, duration, thumbnail) when possible.
 
 Request:
 
@@ -57,6 +54,8 @@ Response:
 
 ### POST `/api/download`
 
+Enqueue multiple video URLs for download in batch.
+
 Request:
 
 ```json
@@ -70,6 +69,8 @@ Response:
 ```
 
 ### GET `/api/status[?id=<download-id>]`
+
+Get real-time status of downloads from the in-memory queue. Use `id` parameter to filter by specific download.
 
 Response:
 
@@ -93,7 +94,7 @@ Response:
 
 ### GET `/api/downloads`
 
-Lists persisted downloads from SQLite.
+Lists persisted downloads from SQLite database with filtering and sorting.
 
 Query params: `status=pending|downloading|completed|error`, `sort=created_at|title|status`, `order=asc|desc`.
 
@@ -120,7 +121,7 @@ Response:
 
 ### GET `/healthz`
 
-Health check; returns `ok`.
+Health check endpoint; returns `ok`.
 
 ## Error codes/messages
 
@@ -133,29 +134,60 @@ Health check; returns `ok`.
 
 ## Dashboard (Templ + HTMX)
 
-- Visit `http://HOST:PORT/dashboard` (or `/`) for a simple dashboard.
-- Includes an enqueue form and a live-updating queue table (polls every 1s).
-- Server-rendered using `github.com/a-h/templ`, updated via HTMX; no client build step.
+- Visit `http://HOST:PORT/dashboard` (or `/`) for a web dashboard
+- Features:
+  - Download form for single/batch URL submission
+  - Real-time progress tracking (auto-refreshes every 1s)
+  - Download history with filtering and sorting
+  - Video metadata display (title, duration, thumbnails)
+- Server-rendered using `github.com/a-h/templ` with HTMX for dynamic updates
+- No client-side JavaScript build required
 
-Dev notes:
+### Development
 
-- The generated `.templ` Go is committed. If you modify templates:
-  - `make tools` (one-time), then `make generate` to re-generate Templ and rebuild CSS.
-- CSS is built from Tailwind v4 via `bun run build-css` into `./static/style.css`.
+- Generated `.templ` Go files are committed to the repository
+- To modify templates:
+  - Install tools: `make tools`
+  - Regenerate: `make generate`
+- CSS built from Tailwind v4: `bun run build-css` → `./static/style.css`
 
 ## Testing
 
-- Unit tests (handlers, state): `go test ./... -race`
-- Integration tests (real `yt-dlp`, network):
-  - `go test -tags=integration ./internal/integration -v`
-  - Env overrides:
-    - `INTEGRATION_URL=https://...`
-    - `INTEGRATION_URLS="https://u1, https://u2"`
-  - Tips: Some providers restrict certain formats; if you see `yt-dlp: exit status 1`, try `--yt-dlp-format`/`VIDEOFETCH_YTDLP_FORMAT` and/or `--yt-dlp-impersonate`.
+- **Unit tests** (handlers, state management): `go test ./... -race`
+- **Integration tests** (real `yt-dlp` + network):
+  - Run: `go test -tags=integration ./internal/integration -v`
+  - Environment overrides:
+    - `INTEGRATION_URL=https://...` (single test URL)
+    - `INTEGRATION_URLS="https://u1, https://u2"` (multiple test URLs)
+  - Tests include: metadata extraction, database persistence, download workflows
+- **Coverage**: Generate with `go test -coverprofile=coverage.out ./...`
 
-## Behavior & notes
+## Architecture & Features
 
-- Worker pool for concurrency; bounded queue for backpressure.
-- Progress parsed from `yt-dlp` via a custom `--progress-template` prefix; on success progress reaches 100 and state `completed`.
-- Fallbacks: on common provider/format errors, the service retries with safer `-f` selections and optional impersonation.
-- Graceful shutdown: stops accepting new jobs, drains HTTP, cancels in-flight downloads, and closes the DB.
+### Core Components
+
+- **Download Manager**: Worker pool with configurable concurrency and bounded queue
+- **Progress Tracking**: Real-time parsing from `yt-dlp` using custom `--progress-template`
+- **Database**: SQLite persistence for download history and metadata
+- **Rate Limiting**: 60 requests/minute per client IP
+- **Metadata Extraction**: Automatic fetching of video title, duration, and thumbnails
+
+### Download Behavior
+
+- Uses `yt-dlp` default format selection for maximum compatibility
+- Includes embedded subtitles, metadata, thumbnails, and chapters
+- Progress updates in real-time from 0-100%
+- Automatic fallbacks for metadata extraction failures
+
+### Graceful Shutdown
+
+1. Stop accepting new HTTP requests
+2. Drain existing HTTP connections
+3. Cancel in-flight downloads
+4. Close database connections
+
+### File Organization
+
+- Downloaded files saved to `--output-dir` with original filenames
+- Database stored in OS cache directory by default
+- Static assets served from `./static/` directory

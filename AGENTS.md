@@ -1,6 +1,6 @@
-# CLAUDE.md (for coding agents)
+# AGENTS.md (for coding agents)
 
-Opinionated, fast, and low‑drama defaults for coding agents working on this repo. If this repository defines a more specific convention, the repo wins.
+Opinionated, fast, and low‑drama defaults for coding agents working on the VideoFetch project. If this repository defines a more specific convention, the repo wins.
 
 ## 0) Purpose & Scope
 
@@ -24,60 +24,81 @@ Opinionated, fast, and low‑drama defaults for coding agents working on this re
 
 ## 3) Repo Specifics (Stack & Structure)
 
-- Service: Go 1.23 web service using stdlib `net/http`.
-- Downloader: external `yt-dlp` via subprocess, with robust progress parsing and fallbacks.
-- Persistence: SQLite (modernc.org/sqlite) always enabled; default DB path under OS cache (`videofectch.db`).
-- UI: Server‑rendered dashboard via `github.com/a-h/templ` + HTMX; CSS via Tailwind v4 built into `static/style.css`.
-- Layout:
-  - `cmd/videofetch/`: entrypoint (`main.go`).
-  - `internal/server/`: HTTP routes, middleware, rate limiter, tests.
-  - `internal/download/`: queue manager, workers, yt-dlp invocation.
-  - `internal/store/`: SQLite schema and CRUD.
-  - `internal/integration/`: opt‑in tests using real downloads.
-  - `static/`: assets including `style.css`; `src/css/input.css` as Tailwind input.
+- **Service**: Go 1.23+ web service using stdlib `net/http`
+- **Downloader**: External `yt-dlp` via subprocess with robust progress parsing and metadata extraction
+- **Persistence**: SQLite (`modernc.org/sqlite`) always enabled; default DB path under OS cache (`videofetch.db`)
+- **UI**: Server‑rendered dashboard via `github.com/a-h/templ` + HTMX; CSS via Tailwind v4 → `static/style.css`
+- **Dependencies**: Minimal - only `templ`, `sqlite`, and dev tools (Bun for CSS)
+- **Layout**:
+  - `cmd/videofetch/`: CLI entrypoint and flags
+  - `internal/server/`: HTTP routes, middleware, rate limiter, dashboard handlers
+  - `internal/download/`: Download manager, worker pool, yt-dlp integration, metadata hooks
+  - `internal/store/`: SQLite schema, CRUD operations, migrations
+  - `internal/ui/`: Templ templates and helpers for dashboard
+  - `internal/integration/`: Real network tests with yt-dlp
+  - `static/`: Static assets (CSS, icons); `src/css/input.css` for Tailwind input
 
 ## 4) Build, Run, Test
 
 - Build: `go build -o videofetch ./cmd/videofetch`
 - Run: `./videofetch --output-dir ./downloads --port 8080 --host 0.0.0.0`
   - Requires `yt-dlp` on `PATH` and support for `--progress-template`.
-- Make (optional): `make run` builds CSS+templ and runs; `make test`; `make tools` to install `templ`.
-- Unit tests: `go test ./... -race` (no network)
-- Integration tests: `go test -tags=integration ./internal/integration -v`
-  - Env: `INTEGRATION_URL=...` or `INTEGRATION_URLS="https://u1, https://u2"`
+- **Make targets**:
+  - `make run`: builds CSS + templ + runs server
+  - `make test`: runs unit tests with race detection
+  - `make tools`: installs `templ` CLI
+  - `make generate`: regenerates templ files + rebuilds CSS
+- **Unit tests**: `go test ./... -race` (no network, mocked dependencies)
+- **Integration tests**: `go test -tags=integration ./internal/integration -v`
+  - Env vars: `INTEGRATION_URL=...` or `INTEGRATION_URLS="url1, url2"`
+  - Tests real yt-dlp + network; includes metadata extraction and DB persistence
 
 ## 5) API & Behavior Snapshot
 
-- REST:
-  - `POST /api/download_single` → enqueue one URL; returns `{status,id,db_id?}`
-  - `POST /api/download` → enqueue batch; returns `{status,ids,db_ids?}`
-  - `GET /api/status[?id=...]` → in‑memory snapshot of active/queued items
-  - `GET /api/downloads` → persisted listing (SQLite)
-  - `GET /healthz` → `ok`
-- Rate limiting: 60 req/min/IP.
-- Queue/backpressure: bounded queue (`--queue`, default 128); `queue_full` on saturation.
-- Fallbacks: automatic retry with safer `-f` selections and optional `--impersonate`.
-- Graceful shutdown: stop accepting, drain HTTP, cancel in‑flight, close DB.
+- **REST API**:
+  - `POST /api/download_single` → enqueue single URL with metadata prefetch; returns `{status,id,db_id}`
+  - `POST /api/download` → enqueue batch URLs; returns `{status,ids,db_ids}`
+  - `GET /api/status[?id=...]` → real-time queue snapshot (in-memory)
+  - `GET /api/downloads` → persisted download history (SQLite) with filtering/sorting
+  - `GET /dashboard`, `/` → web dashboard (Templ + HTMX)
+  - `GET /healthz` → health check
+- **Rate limiting**: 60 req/min per client IP
+- **Queue management**: Bounded queue (`--queue`, default 128); returns `queue_full` on saturation
+- **Download features**:
+  - Automatic metadata extraction (title, duration, thumbnail) before download
+  - Real-time progress tracking via custom yt-dlp progress template
+  - Default format selection with embedded subtitles, metadata, thumbnails, chapters
+- **Graceful shutdown**: Stop accepting requests → drain HTTP → cancel downloads → close DB
 
 ## 6) Coding Style & Tooling
 
-- Indentation: tabs, width 4, LF (see `.editorconfig`).
-- Format/lint: `go fmt ./...`, `go vet ./...` (optionally `golangci-lint run`).
-- Logging: `log.Printf` with concise, structured-ish messages.
-- TS/CSS (optional): Tailwind v4 via Bun (`bun run build-css`). No JS build for the dashboard.
+- **Indentation**: tabs, width 4, LF (see `.editorconfig`)
+- **Format/lint**: `go fmt ./...`, `go vet ./...` (optionally `golangci-lint run`)
+- **Logging**: `log.Printf` with structured messages; minimal and purposeful
+- **CSS build**: Tailwind v4 via Bun (`bun run build-css` → `static/style.css`)
+- **No client JS**: Dashboard uses pure HTMX for interactivity; no build step required
 
 ## 7) Testing Strategy
 
-- Unit: focus on HTTP handlers and state transitions (`internal/server`), `httptest`, table tests, no network.
-- Integration: real `yt-dlp` + network behind `-tags=integration`. Keep URLs stable/small.
-- Always run with `-race` locally.
-- Always run integration tests locally.
+- **Unit tests**: HTTP handlers, state transitions, business logic
+  - Use `httptest.ResponseRecorder` for HTTP tests
+  - Table-driven tests for multiple scenarios
+  - Mock external dependencies (no network/filesystem)
+  - Always run with `-race` flag
+- **Integration tests**: Real yt-dlp + network (behind `-tags=integration`)
+  - Test metadata extraction workflows
+  - Test database persistence end-to-end
+  - Use small, stable test URLs
+  - Include progress tracking and error scenarios
+- **Coverage**: Track test coverage; aim for high coverage on critical paths
 
 ## 8) Security & Configuration
 
-- No secrets in repo. Don’t hardcode credentials or private URLs in tests.
-- Validate URLs (HTTP/HTTPS only). Respect the built‑in rate limiter.
-- Env/flags: `VIDEOFETCH_YTDLP_FORMAT`, `VIDEOFETCH_YTDLP_IMPERSONATE`; CLI flags override env.
+- **No secrets**: Never commit credentials, API keys, or private URLs
+- **URL validation**: Only allow HTTP/HTTPS URLs; reject file://, ftp://, etc.
+- **Rate limiting**: Respect built-in rate limiter (60 req/min/IP)
+- **Input validation**: Sanitize all user inputs; limit request body sizes
+- **Safe defaults**: Use least-privilege file permissions and secure temp directories
 
 ## 9) Project Hygiene
 
@@ -94,7 +115,14 @@ Opinionated, fast, and low‑drama defaults for coding agents working on this re
 ## 11) Quick API Smoke
 
 ```bash
+# Single download
 curl -X POST localhost:8080/api/download_single \
   -H 'Content-Type: application/json' \
-  -d '{"url":"https://example.com/video.mp4"}'
+  -d '{"url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'
+
+# Check status
+curl localhost:8080/api/status
+
+# View dashboard
+open http://localhost:8080/dashboard
 ```

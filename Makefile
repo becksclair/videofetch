@@ -13,6 +13,7 @@ build: generate
 
 test:
 	go test ./... -race
+	go test -tags=integration ./internal/integration -v
 
 run: build
 	@command -v yt-dlp >/dev/null 2>&1 || { echo "yt-dlp not found on PATH" >&2; exit 1; }
