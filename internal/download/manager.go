@@ -337,12 +337,13 @@ func (m *Manager) parseProgress(id string, sc *bufio.Scanner) {
 		}
 		if tBytes > 0 && downloaded >= 0 {
 			p := downloaded / tBytes * 100.0
-			if p >= 100 {
-				p = 99
+			// Cap percentage to [0,100]; allow exact 100 when reported.
+			if p > 100 {
+				p = 100
+			} else if p < 0 {
+				p = 0
 			}
-			if p >= 0 {
-				m.updateProgress(id, p)
-			}
+			m.updateProgress(id, p)
 		}
 	}
 	if err := sc.Err(); err != nil {

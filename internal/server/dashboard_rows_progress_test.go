@@ -42,7 +42,7 @@ func TestDashboardRows_ProgressIncrements(t *testing.T) {
 		t.Fatalf("status=%d", w1.Code)
 	}
 	body1 := w1.Body.String()
-	if !strings.Contains(body1, "data-progress=\"1\"") {
+	if !strings.Contains(body1, "data-progress=\"1.0\"") {
 		t.Fatalf("expected data-progress=\"1\" in rows, got: %q", body1)
 	}
 
@@ -56,7 +56,7 @@ func TestDashboardRows_ProgressIncrements(t *testing.T) {
 		t.Fatalf("status=%d", w2.Code)
 	}
 	body2 := w2.Body.String()
-	if !strings.Contains(body2, "data-progress=\"47\"") { // ensure not jumping to 100
+	if !strings.Contains(body2, "data-progress=\"47.0\"") { // ensure not jumping to 100
 		t.Fatalf("expected data-progress=\"47\", got: %q", body2)
 	}
 
@@ -70,7 +70,7 @@ func TestDashboardRows_ProgressIncrements(t *testing.T) {
 		t.Fatalf("status=%d", w3.Code)
 	}
 	body3 := w3.Body.String()
-	if !strings.Contains(body3, "data-progress=\"100\"") {
+	if !strings.Contains(body3, "data-progress=\"100.0\"") {
 		t.Fatalf("expected data-progress=\"100\", got: %q", body3)
 	}
 }

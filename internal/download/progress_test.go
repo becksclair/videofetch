@@ -8,8 +8,7 @@ import (
 
 // Test that only remedia (download) lines affect the percentage, and
 // that unrelated 100% lines (e.g., from [Merger] or other phases) are ignored.
-// Also ensure the parser does not set progress to 100% prematurely; final 100%
-// is set by the worker upon completion.
+// If remedia reports full bytes downloaded, allow progress to reach 100.
 func TestParseProgress_IgnoresNonDownloadPhases(t *testing.T) {
 	m := &Manager{downloads: map[string]*Item{"x": {ID: "x", URL: "u", Progress: 0, State: StateDownloading}}}
 
@@ -27,8 +26,8 @@ func TestParseProgress_IgnoresNonDownloadPhases(t *testing.T) {
 	m.parseProgress("x", sc)
 
 	got := m.Snapshot("x")[0].Progress
-	if !(got >= 99 && got < 100) {
-		t.Fatalf("expected progress close to 100 but <100, got %.1f", got)
+	if got != 100.0 {
+		t.Fatalf("expected progress 100.0, got %.1f", got)
 	}
 
 	// Re-run with only a non-[download] 100% line first to ensure it does not set to 100

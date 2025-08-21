@@ -26,8 +26,8 @@ templ Dashboard(items []*download.Item) {
                     let errorCount = 0;
                     let maxErrors = 3;
                     let isServerDown = false;
-                    let currentInterval = 2; // seconds
-                    const originalInterval = 2;
+                    let currentInterval = 1; // seconds
+                    const originalInterval = 1;
                     const maxInterval = 30;
                     
                     function updatePollingInterval(intervalSeconds) {
@@ -131,7 +131,7 @@ templ Dashboard(items []*download.Item) {
                     </select>
                 </label>
             </form>
-            <div id="queue" hx-get="/dashboard/rows" hx-trigger="load, every 2s, refresh" hx-include="#controls-form" hx-target="#queue" hx-swap="innerHTML">
+            <div id="queue" hx-get="/dashboard/rows" hx-trigger="load, every 1s, refresh" hx-include="#controls-form" hx-target="#queue" hx-swap="innerHTML">
                 @QueueTable(items)
             </div>
         </body>
@@ -193,8 +193,8 @@ templ QueueRows(items []*download.Item) {
                 }
             </td>
             <td class="p-2 border-b border-gray-200 align-middle">
-                <div class="progress"><div class="bar" data-progress={ fmt.Sprintf("%.0f", it.Progress) }></div></div>
-                <span class="pct">{ fmt.Sprintf("%.0f%%", it.Progress) }</span>
+                <div class="progress"><div class="bar" data-progress={ fmt.Sprintf("%.1f", it.Progress) }></div></div>
+                <span class="pct">{ fmt.Sprintf("%.1f%%", it.Progress) }</span>
             </td>
             <td class="p-2 border-b border-gray-200 align-middle">
                 if it.Error != "" {
@@ -258,8 +258,8 @@ templ DashboardLCARS(items []*download.Item) {
                     let errorCount = 0;
                     let maxErrors = 3;
                     let isServerDown = false;
-                    let currentInterval = 2;
-                    const originalInterval = 2;
+                    let currentInterval = 1;
+                    const originalInterval = 1;
                     const maxInterval = 30;
                     
                     function updatePollingInterval(intervalSeconds) {
@@ -396,7 +396,7 @@ templ DashboardLCARS(items []*download.Item) {
                         <div class="p-4 bg-neutral-800 border-b border-[#99FFCC]">
                             <div class="w-full text-[#99FFCC] text-[18px] font-bold m-0 whitespace-nowrap overflow-hidden text-ellipsis">DOWNLOAD QUEUE STATUS</div>
                         </div>
-                        <div id="queue" hx-get="/dashboard-lcars/rows" hx-trigger="load, every 2s, refresh" hx-include="#controls-form" hx-target="#queue" hx-swap="innerHTML" class="flex-1 overflow-y-auto p-4">
+                        <div id="queue" hx-get="/dashboard-lcars/rows" hx-trigger="load, every 1s, refresh" hx-include="#controls-form" hx-target="#queue" hx-swap="innerHTML" class="flex-1 overflow-y-auto p-4">
                             @QueueTableLCARS(items)
                         </div>
                     </div>
@@ -451,10 +451,10 @@ templ QueueRowLCARS(it *download.Item) {
                 
                 <!-- Progress Bar -->
                 <div class="bg-neutral-800 h-3 border border-neutral-600 rounded-md overflow-hidden">
-                    <div class="h-full bg-gradient-to-r from-[#FFCC99] to-[#FF9966] transition-all progress-bar" data-progress={ fmt.Sprintf("%.0f", it.Progress) }></div>
+                    <div class="h-full bg-gradient-to-r from-[#FFCC99] to-[#FF9966] transition-all progress-bar" data-progress={ fmt.Sprintf("%.1f", it.Progress) }></div>
                 </div>
                 <div class="text-[12px] text-[#CCC] mt-[6px] font-bold">
-                    { fmt.Sprintf("%.0f%%", it.Progress) } COMPLETE
+                    { fmt.Sprintf("%.1f%%", it.Progress) } COMPLETE
                     if it.Duration > 0 {
                         <span class="ml-3">DURATION: { fmt.Sprintf("%dm%02ds", it.Duration/60, it.Duration%60) }</span>
                     }
