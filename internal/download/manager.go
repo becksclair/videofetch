@@ -293,9 +293,9 @@ func (m *Manager) executeWithProgressTracking(id string, cmd *exec.Cmd) error {
 		return fmt.Errorf("yt-dlp: %w", err)
 	}
 
-	// Extract filename from stdout after successful completion
-	stdoutStr := strings.TrimSpace(stdoutBuf.String())
-	if filename := m.extractFilename(stdoutStr); filename != "" {
+	// Extract filename from combined output (some yt-dlp messages go to stderr)
+	combined := strings.TrimSpace(stdoutBuf.String() + "\n" + stderrBuf.String())
+	if filename := m.extractFilename(combined); filename != "" {
 		m.setFilename(id, filename)
 	}
 
@@ -521,38 +521,69 @@ func (m *Manager) updateFailure(id string, err error) {
 // extractFilename extracts the downloaded filename from yt-dlp output
 func (m *Manager) extractFilename(output string) string {
 	lines := strings.Split(output, "\n")
+	var (
+		mergedName      string
+		alreadyDLName   string
+		lastDestination string
+	)
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		// Look for the destination line that shows where the file was saved
-		if strings.Contains(line, "Destination:") {
-			// Extract filename from "Destination: /path/to/file.ext"
-			parts := strings.SplitN(line, "Destination:", 2)
-			if len(parts) == 2 {
-				path := strings.TrimSpace(parts[1])
-				return filepath.Base(path)
-			}
+		if line == "" {
+			continue
 		}
-		// Also check for merge output lines like "Merging formats into 'filename'"
+		// Prefer explicit final filename from merger stage
 		if strings.Contains(line, "Merging formats into") {
-			start := strings.Index(line, "'")
+			// Support both single and double quotes
+			// Example: [Merger] Merging formats into 'Title-id.mp4'
+			// or: [Merger] Merging formats into "Title-id.mp4"
+			start := strings.IndexAny(line, "'\"")
 			if start != -1 {
-				end := strings.Index(line[start+1:], "'")
-				if end != -1 {
-					path := line[start+1 : start+1+end]
-					return filepath.Base(path)
+				quote := line[start]
+				rest := line[start+1:]
+				if end := strings.IndexByte(rest, quote); end != -1 {
+					mergedName = filepath.Base(rest[:end])
+					continue
 				}
 			}
 		}
-		// Check for final output lines with [download] tag
+		// If yt-dlp says file already exists, that includes the final filename
 		if strings.HasPrefix(line, "[download]") && strings.Contains(line, "has already been downloaded") {
-			// Extract from "[download] filename has already been downloaded"
+			// Format: [download] Title-id.mp4 has already been downloaded
+			// After prefix, take the segment before " has already"
+			// Fall back to fields if needed
+			if i := strings.Index(line, "] "); i != -1 {
+				rest := line[i+2:]
+				if j := strings.Index(rest, " has already been downloaded"); j != -1 {
+					alreadyDLName = filepath.Base(strings.TrimSpace(rest[:j]))
+					continue
+				}
+			}
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
-				return filepath.Base(parts[1])
+				alreadyDLName = filepath.Base(parts[1])
+				continue
+			}
+		}
+		// Record destination lines as a fallback (may be intermediate e.g., fXXX selections)
+		if strings.Contains(line, "Destination:") {
+			parts := strings.SplitN(line, "Destination:", 2)
+			if len(parts) == 2 {
+				path := strings.TrimSpace(parts[1])
+				lastDestination = filepath.Base(path)
+				continue
 			}
 		}
 	}
-	return ""
+	switch {
+	case mergedName != "":
+		return mergedName
+	case alreadyDLName != "":
+		return alreadyDLName
+	case lastDestination != "":
+		return lastDestination
+	default:
+		return ""
+	}
 }
 
 // setFilename updates the filename for an item and calls the hook
