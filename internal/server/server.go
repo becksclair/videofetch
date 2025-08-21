@@ -302,6 +302,16 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		_ = ui.Dashboard(items).Render(context.Background(), w)
 	}))
 
+	mux.HandleFunc("/dashboard-lcars", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		items := mgr.Snapshot("")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = ui.DashboardLCARS(items).Render(context.Background(), w)
+	}))
+
 	mux.HandleFunc("/dashboard/rows", with(rl, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
@@ -396,6 +406,100 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		_ = ui.QueueTable(items).Render(context.Background(), w)
 	}))
 
+	mux.HandleFunc("/dashboard-lcars/rows", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		// Optional filter/sort controls
+		q := r.URL.Query()
+		status := strings.ToLower(strings.TrimSpace(q.Get("status")))
+		sortBy := strings.ToLower(strings.TrimSpace(q.Get("sort")))
+		order := strings.ToLower(strings.TrimSpace(q.Get("order")))
+
+		var items []*download.Item
+		if st != nil {
+			// Prefer persisted listing when DB is enabled
+			f := store.ListFilter{Status: status, Sort: sortBy, Order: order}
+			rows, err := st.ListDownloads(r.Context(), f)
+			if err != nil {
+				log.Printf("list downloads: %v", err)
+				rows = nil
+			}
+			items = make([]*download.Item, 0, len(rows))
+			for i := range rows {
+				d := rows[i]
+				// Map DB status to in-memory state
+				var stt download.State
+				switch strings.ToLower(d.Status) {
+				case "downloading":
+					stt = download.StateDownloading
+				case "completed":
+					stt = download.StateCompleted
+				case "error":
+					stt = download.StateFailed
+				default:
+					stt = download.StateQueued
+				}
+				items = append(items, &download.Item{
+					ID:           fmt.Sprintf("%d", d.ID),
+					URL:          d.URL,
+					Title:        d.Title,
+					Duration:     d.Duration,
+					ThumbnailURL: d.ThumbnailURL,
+					Progress:     d.Progress,
+					State:        stt,
+					Filename:     d.Filename,
+				})
+			}
+		} else {
+			// Fallback: in-memory snapshot with basic filter/sort
+			items = mgr.Snapshot("")
+			if status != "" {
+				filtered := make([]*download.Item, 0, len(items))
+				for _, it := range items {
+					if string(it.State) == status {
+						filtered = append(filtered, it)
+					}
+				}
+				items = filtered
+			}
+			if sortBy != "" {
+				less := func(i, j int) bool { return false }
+				switch sortBy {
+				case "title":
+					less = func(i, j int) bool {
+						ai := items[i].Title
+						if ai == "" {
+							ai = items[i].URL
+						}
+						aj := items[j].Title
+						if aj == "" {
+							aj = items[j].URL
+						}
+						return strings.ToLower(ai) < strings.ToLower(aj)
+					}
+				case "status":
+					less = func(i, j int) bool { return items[i].State < items[j].State }
+				case "progress":
+					less = func(i, j int) bool { return items[i].Progress < items[j].Progress }
+				case "date":
+					// No exported timestamps on snapshot items; ignore
+					less = nil
+				}
+				if less != nil {
+					if order == "desc" {
+						sort.Slice(items, func(i, j int) bool { return less(j, i) })
+					} else {
+						sort.Slice(items, less)
+					}
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = ui.QueueTableLCARS(items).Render(context.Background(), w)
+	}))
+
 	mux.HandleFunc("/dashboard/enqueue", with(rl, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w)
@@ -473,6 +577,83 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		_, _ = w.Write([]byte(response))
 	}))
 
+	mux.HandleFunc("/dashboard-lcars/enqueue", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Invalid form data</div>`))
+			return
+		}
+		u := strings.TrimSpace(r.Form.Get("url"))
+		if !validURL(u) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Invalid URL</div>`))
+			return
+		}
+
+		// Enqueue immediately without metadata fetching to make it async
+		id, err := mgr.Enqueue(u)
+		if err != nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			switch err.Error() {
+			case "queue_full":
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Queue is full, try again later</div>`))
+			case "shutting_down":
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Service is shutting down</div>`))
+			default:
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Internal error</div>`))
+			}
+			return
+		}
+
+		// Create minimal DB record and fetch metadata asynchronously
+		if storeCreate != nil {
+			go func() {
+				var dbid int64
+				var title string
+				var dur int64
+				var thumb string
+				
+				// Create initial DB record with URL as title
+				if idv, err := storeCreate(context.Background(), u, u, 0, "", "pending", 0); err == nil {
+					dbid = idv
+					mgr.AttachDB(id, dbid)
+					
+					// Fetch metadata asynchronously
+					if mi, err := download.FetchMediaInfo(u); err == nil {
+						title, dur, thumb = mi.Title, mi.DurationSec, mi.ThumbnailURL
+						mgr.SetMeta(id, title, dur, thumb)
+						if storeUpdateMeta != nil {
+							_ = storeUpdateMeta(context.Background(), dbid, title, dur, thumb)
+						}
+					}
+				} else {
+					log.Printf("db create error: %v", err)
+				}
+			}()
+		}
+
+		// Return immediate success response with auto-clear and trigger queue refresh
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		
+		// Generate response with success message and script to refresh queue
+		response := `<div class="lcars-element left-rounded" style="background-color: #99cc99; color: black; padding: 8px;">✓ Video queued successfully <script>
+			setTimeout(() => document.getElementById('enqueue-status').innerHTML = '', 3000);
+			htmx.trigger('#queue', 'refresh');
+		</script></div>`
+		
+		_, _ = w.Write([]byte(response))
+	}))
+
 	// Dashboard remove endpoint
 	if st != nil {
 		mux.HandleFunc("/dashboard/remove", with(rl, func(w http.ResponseWriter, r *http.Request) {
@@ -507,6 +688,44 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
 			response := `<div class="text-green-600 text-sm">✓ Item removed <script>
+				setTimeout(() => document.getElementById('remove-status').innerHTML = '', 2000);
+				htmx.trigger('#queue', 'refresh');
+			</script></div>`
+			_, _ = w.Write([]byte(response))
+		}))
+
+		mux.HandleFunc("/dashboard-lcars/remove", with(rl, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w)
+				return
+			}
+			if err := r.ParseForm(); err != nil {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Invalid form data</div>`))
+				return
+			}
+			idStr := strings.TrimSpace(r.Form.Get("id"))
+			var id int64
+			if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id <= 0 {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Invalid ID</div>`))
+				return
+			}
+			
+			if err := st.DeleteDownload(r.Context(), id); err != nil {
+				log.Printf("delete download id=%d: %v", id, err)
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Failed to remove item</div>`))
+				return
+			}
+			
+			// Return success response and trigger queue refresh
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			response := `<div class="lcars-element left-rounded" style="background-color: #99cc99; color: black; padding: 8px;">✓ Item removed <script>
 				setTimeout(() => document.getElementById('remove-status').innerHTML = '', 2000);
 				htmx.trigger('#queue', 'refresh');
 			</script></div>`

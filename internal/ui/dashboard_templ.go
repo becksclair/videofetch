@@ -332,4 +332,348 @@ func QueueRows(items []*download.Item) templ.Component {
 	})
 }
 
+// DashboardLCARS renders the full HTML page containing the enqueue form
+// and the queue table in LCARS style
+func DashboardLCARS(items []*download.Item) templ.Component {
+	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
+		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
+			return templ_7745c5c3_CtxErr
+		}
+		templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
+		if !templ_7745c5c3_IsBuffer {
+			defer func() {
+				templ_7745c5c3_BufErr := templruntime.ReleaseBuffer(templ_7745c5c3_Buffer)
+				if templ_7745c5c3_Err == nil {
+					templ_7745c5c3_Err = templ_7745c5c3_BufErr
+				}
+			}()
+		}
+		ctx = templ.InitializeContext(ctx)
+		templ_7745c5c3_Var15 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var15 == nil {
+			templ_7745c5c3_Var15 = templ.NopComponent
+		}
+		ctx = templ.ClearChildren(ctx)
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 29, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>VideoFetch LCARS Interface</title><link rel=\"icon\" type=\"image/x-icon\" href=\"/static/App.ico\"><script src=\"https://unpkg.com/htmx.org@1.9.12\" integrity=\"sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2\" crossorigin=\"anonymous\"></script><link rel=\"stylesheet\" href=\"/static/lcars.css\"><script src=\"/static/lcars_audio.js\"></script><style>\n                body {\n                    margin: 0;\n                    padding: 0;\n                    background-color: #000000;\n                    font-family: \"Helvetica\", \"Arial\", sans-serif;\n                    color: #FFFF99;\n                    overflow-x: hidden;\n                    height: 100vh;\n                }\n                .status-message {\n                    margin: 8px 0;\n                }\n                .progress-bar-lcars {\n                    background-color: #222222;\n                    height: 12px;\n                    border: 1px solid #666666;\n                    margin: 6px 0;\n                    position: relative;\n                    border-radius: 6px;\n                    overflow: hidden;\n                }\n                .progress-bar-fill {\n                    height: 100%;\n                    background: linear-gradient(90deg, #FFCC99 0%, #FF9966 100%);\n                    transition: width 0.3s ease;\n                    border: none;\n                    border-radius: 6px;\n                }\n                .thumbnail-container {\n                    width: 90px;\n                    height: 68px;\n                    display: flex;\n                    align-items: center;\n                    justify-content: center;\n                    background-color: #333333;\n                    border: 1px solid #666666;\n                    border-radius: 6px;\n                    overflow: hidden;\n                }\n                .thumbnail-img {\n                    max-width: 88px;\n                    max-height: 66px;\n                    object-fit: cover;\n                    border-radius: 4px;\n                }\n                .queue-item {\n                    margin-bottom: 12px;\n                    border: 2px solid #666666;\n                    background-color: #111111;\n                    border-radius: 8px;\n                    transition: border-color 0.3s ease;\n                }\n                .queue-item:hover {\n                    border-color: #FFCC99;\n                }\n                .queue-item-content {\n                    padding: 16px;\n                    display: flex;\n                    gap: 16px;\n                    align-items: flex-start;\n                }\n                .queue-item-main {\n                    flex: 1;\n                    min-width: 0;\n                }\n                .queue-item-title {\n                    font-weight: bold;\n                    font-size: 15px;\n                    margin-bottom: 6px;\n                    color: #FFCC99;\n                    white-space: nowrap;\n                    overflow: hidden;\n                    text-overflow: ellipsis;\n                    line-height: 1.2;\n                }\n                .queue-item-url {\n                    font-size: 11px;\n                    color: #999999;\n                    margin-bottom: 10px;\n                    white-space: nowrap;\n                    overflow: hidden;\n                    text-overflow: ellipsis;\n                }\n                .queue-item-progress {\n                    font-size: 12px;\n                    color: #CCCCCC;\n                    margin-top: 6px;\n                    font-weight: bold;\n                }\n                .queue-item-actions {\n                    display: flex;\n                    flex-direction: column;\n                    gap: 6px;\n                    min-width: 90px;\n                    align-items: stretch;\n                }\n                .lcars-app-container {\n                    height: 100vh;\n                    position: relative;\n                    overflow: hidden;\n                }\n                .status-message {\n                    margin: 8px 0;\n                    padding: 8px;\n                    border-radius: 4px;\n                    background-color: rgba(255, 204, 153, 0.1);\n                    border: 1px solid #FFCC99;\n                    font-size: 12px;\n                }\n                .htmx-indicator {\n                    display: none;\n                }\n                .htmx-request .htmx-indicator {\n                    display: inline;\n                    color: #FFCC99;\n                    font-weight: bold;\n                }\n            </style><script>\n                // HTMX error handling\n                document.addEventListener('DOMContentLoaded', function() {\n                    let errorCount = 0;\n                    let maxErrors = 3;\n                    let isServerDown = false;\n                    let currentInterval = 2;\n                    const originalInterval = 2;\n                    const maxInterval = 30;\n                    \n                    function updatePollingInterval(intervalSeconds) {\n                        const queueDiv = document.getElementById('queue');\n                        if (queueDiv && !isServerDown) {\n                            queueDiv.setAttribute('hx-trigger', `load, every ${intervalSeconds}s, refresh`);\n                            htmx.process(queueDiv);\n                        }\n                    }\n                    \n                    document.body.addEventListener('htmx:sendError', function(evt) {\n                        errorCount++;\n                        console.log(`HTMX request failed (${errorCount}/${maxErrors}):`, evt.detail);\n                        \n                        if (errorCount >= maxErrors && !isServerDown) {\n                            isServerDown = true;\n                            const queueDiv = document.getElementById('queue');\n                            if (queueDiv) {\n                                queueDiv.removeAttribute('hx-trigger');\n                                queueDiv.innerHTML = '<div style=\"text-align: center; padding: 40px;\"><div style=\"background-color: #cc6677; color: white; padding: 16px; border: 2px solid #ff6677; margin-bottom: 16px;\"><div style=\"font-size: 18px; font-weight: bold; margin-bottom: 8px;\">⚠️ CONNECTION TO STARFLEET COMMAND LOST</div><div style=\"font-size: 12px; opacity: 0.9;\">COMMUNICATION ARRAY OFFLINE - REFRESH WHEN CONNECTION RESTORED</div></div></div>';\n                            }\n                        } else if (errorCount > 0 && !isServerDown) {\n                            currentInterval = Math.min(currentInterval * 2, maxInterval);\n                            updatePollingInterval(currentInterval);\n                        }\n                    });\n                    \n                    document.body.addEventListener('htmx:afterRequest', function(evt) {\n                        if (evt.detail.successful) {\n                            if (errorCount > 0) {\n                                errorCount = 0;\n                                currentInterval = originalInterval;\n                                updatePollingInterval(currentInterval);\n                            }\n                            if (isServerDown) {\n                                isServerDown = false;\n                                location.reload();\n                            }\n                        }\n                    });\n                });\n            </script></head><body><div class=\"lcars-app-container\"><!-- HEADER --><div id=\"header\" class=\"lcars-row header\"><div class=\"lcars-elbow left-bottom lcars-golden-tanoi-bg\"></div><div class=\"lcars-bar horizontal\"><div class=\"lcars-title right\">VIDEOFETCH COMMAND INTERFACE</div></div><div class=\"lcars-bar horizontal right-end decorated\"></div></div><!-- SIDE MENU --><div id=\"left-menu\" class=\"lcars-column start-space lcars-u-1\"><div class=\"lcars-element button lcars-chestnut-rose-bg\" style=\"margin-bottom: 0.25rem;\">MAIN OPS</div><div class=\"lcars-element button lcars-pale-canary-bg\" style=\"margin-bottom: 0.25rem;\">QUEUE</div><div class=\"lcars-element button\" style=\"margin-bottom: 0.25rem;\">DOWNLOADS</div><div class=\"lcars-element button\" style=\"margin-bottom: 0.25rem;\">STATUS</div><div class=\"lcars-element button\" style=\"margin-bottom: 0.25rem;\">SETTINGS</div><a href=\"/dashboard\" style=\"text-decoration: none; color: inherit;\"><div class=\"lcars-element button lcars-lavender-purple-bg\" style=\"margin-bottom: 0.25rem;\">CLASSIC UI</div></a><div class=\"lcars-bar lcars-u-1\" style=\"flex-grow: 1;\"></div></div><!-- FOOTER --><div id=\"footer\" class=\"lcars-row\"><div class=\"lcars-elbow left-top lcars-golden-tanoi-bg\"></div><div class=\"lcars-bar horizontal both-divider bottom\"></div><div class=\"lcars-bar horizontal right-end left-divider bottom\"></div></div><!-- MAIN CONTAINER --><div id=\"container\" style=\"flex: 1; display: flex; flex-direction: column; padding: 16px; gap: 16px; margin-left: 200px; margin-top: 80px; margin-bottom: 80px; overflow-y: auto;\"><!-- URL INPUT SECTION --><div class=\"lcars-input-section\" style=\"background-color: #1a1a1a; border: 2px solid #FFCC99; padding: 16px; border-radius: 8px;\"><div class=\"lcars-text-box big\" style=\"margin-bottom: 12px; color: #FFCC99; font-size: 16px; font-weight: bold;\">MEDIA ACQUISITION PROTOCOL</div><form hx-post=\"/dashboard-lcars/enqueue\" hx-target=\"#enqueue-status\" hx-swap=\"innerHTML\" style=\"display: flex; gap: 12px; align-items: center;\"><input type=\"url\" name=\"url\" placeholder=\"ENTER MEDIA RESOURCE LOCATOR\" required class=\"lcars-text-input decorated\" style=\"flex: 1; padding: 12px; font-size: 14px; background-color: #000000; color: #FFCC99; border: 1px solid #FFCC99; border-radius: 4px;\"> <button type=\"submit\" class=\"lcars-element button lcars-atomic-tangerine-bg\" style=\"padding: 12px 20px; cursor: pointer; background-color: #FF9966; color: #000000; font-weight: bold; border: none; border-radius: 4px;\">ENGAGE</button></form><div id=\"enqueue-status\" class=\"status-message\"></div><div id=\"remove-status\" class=\"status-message\"></div></div><!-- CONTROLS SECTION --><div class=\"lcars-controls-section\" style=\"background-color: #1a1a1a; border: 2px solid #99CCFF; padding: 12px; border-radius: 8px;\"><form id=\"controls-form\" hx-get=\"/dashboard-lcars/rows\" hx-target=\"#queue\" hx-trigger=\"change\" hx-swap=\"innerHTML\" style=\"display: flex; gap: 16px; align-items: center; flex-wrap: wrap;\"><div class=\"lcars-text-box\" style=\"color: #99CCFF; font-weight: bold;\">FILTER CONTROLS:</div><label style=\"display: flex; align-items: center; gap: 8px;\"><span style=\"color: #99CCFF; font-weight: bold;\">STATUS:</span> <select name=\"status\" class=\"lcars-text-input\" style=\"padding: 6px; background-color: #000000; color: #99CCFF; border: 1px solid #99CCFF; border-radius: 4px;\"><option value=\"\">ALL</option> <option value=\"queued\">QUEUED</option> <option value=\"downloading\">DOWNLOADING</option> <option value=\"completed\">COMPLETED</option> <option value=\"failed\">FAILED</option></select></label> <label style=\"display: flex; align-items: center; gap: 8px;\"><span style=\"color: #99CCFF; font-weight: bold;\">SORT:</span> <select name=\"sort\" class=\"lcars-text-input\" style=\"padding: 6px; background-color: #000000; color: #99CCFF; border: 1px solid #99CCFF; border-radius: 4px;\"><option value=\"\">DEFAULT</option> <option value=\"date\">DATE</option> <option value=\"status\">STATUS</option> <option value=\"title\">TITLE</option> <option value=\"progress\">PROGRESS</option></select></label> <label style=\"display: flex; align-items: center; gap: 8px;\"><span style=\"color: #99CCFF; font-weight: bold;\">ORDER:</span> <select name=\"order\" class=\"lcars-text-input\" style=\"padding: 6px; background-color: #000000; color: #99CCFF; border: 1px solid #99CCFF; border-radius: 4px;\"><option value=\"desc\">DESC</option> <option value=\"asc\">ASC</option></select></label></form></div><!-- QUEUE DISPLAY --><div class=\"lcars-queue-section\" style=\"flex: 1; background-color: #1a1a1a; border: 2px solid #99FFCC; border-radius: 8px; overflow: hidden; display: flex; flex-direction: column;\"><div style=\"padding: 16px; background-color: #2a2a2a; border-bottom: 1px solid #99FFCC;\"><div class=\"lcars-text-box large\" style=\"color: #99FFCC; font-size: 18px; font-weight: bold; margin: 0;\">DOWNLOAD QUEUE STATUS</div></div><div id=\"queue\" hx-get=\"/dashboard-lcars/rows\" hx-trigger=\"load, every 2s, refresh\" hx-include=\"#controls-form\" hx-target=\"#queue\" hx-swap=\"innerHTML\" style=\"flex: 1; overflow-y: auto; padding: 16px;\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = QueueTableLCARS(items).Render(ctx, templ_7745c5c3_Buffer)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 30, "</div></div></div></div><audio id=\"audDummy\"></audio></body></html>")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		return nil
+	})
+}
+
+// QueueTableLCARS renders the queue in LCARS style
+func QueueTableLCARS(items []*download.Item) templ.Component {
+	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
+		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
+			return templ_7745c5c3_CtxErr
+		}
+		templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
+		if !templ_7745c5c3_IsBuffer {
+			defer func() {
+				templ_7745c5c3_BufErr := templruntime.ReleaseBuffer(templ_7745c5c3_Buffer)
+				if templ_7745c5c3_Err == nil {
+					templ_7745c5c3_Err = templ_7745c5c3_BufErr
+				}
+			}()
+		}
+		ctx = templ.InitializeContext(ctx)
+		templ_7745c5c3_Var16 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var16 == nil {
+			templ_7745c5c3_Var16 = templ.NopComponent
+		}
+		ctx = templ.ClearChildren(ctx)
+		if len(items) == 0 {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 31, "<div style=\"text-align: center; padding: 32px; color: #CCCCCC;\"><div class=\"lcars-text-box large\">NO ACTIVE DOWNLOADS</div><div style=\"margin-top: 8px; font-size: 12px;\">QUEUE IS EMPTY</div></div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 32, "<div style=\"display: flex; flex-direction: column; gap: 6px;\">")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			for _, it := range items {
+				templ_7745c5c3_Err = QueueRowLCARS(it).Render(ctx, templ_7745c5c3_Buffer)
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 33, "</div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		}
+		return nil
+	})
+}
+
+// QueueRowLCARS renders a single queue item in LCARS style
+func QueueRowLCARS(it *download.Item) templ.Component {
+	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
+		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
+			return templ_7745c5c3_CtxErr
+		}
+		templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
+		if !templ_7745c5c3_IsBuffer {
+			defer func() {
+				templ_7745c5c3_BufErr := templruntime.ReleaseBuffer(templ_7745c5c3_Buffer)
+				if templ_7745c5c3_Err == nil {
+					templ_7745c5c3_Err = templ_7745c5c3_BufErr
+				}
+			}()
+		}
+		ctx = templ.InitializeContext(ctx)
+		templ_7745c5c3_Var17 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var17 == nil {
+			templ_7745c5c3_Var17 = templ.NopComponent
+		}
+		ctx = templ.ClearChildren(ctx)
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 34, "<div class=\"queue-item\"><div class=\"queue-item-content\"><!-- Thumbnail --><div class=\"thumbnail-container\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		if it.ThumbnailURL != "" {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 35, "<img src=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var18 string
+			templ_7745c5c3_Var18, templ_7745c5c3_Err = templ.JoinStringErrs(it.ThumbnailURL)
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 525, Col: 46}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var18))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 36, "\" alt=\"thumb\" class=\"thumbnail-img\">")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 37, "<div style=\"color: #666; font-size: 10px; text-align: center;\">NO<br>IMAGE</div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 38, "</div><!-- Main Content --><div class=\"queue-item-main\"><div class=\"queue-item-title\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		if it.Title != "" {
+			var templ_7745c5c3_Var19 string
+			templ_7745c5c3_Var19, templ_7745c5c3_Err = templ.JoinStringErrs(it.Title)
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 535, Col: 34}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var19))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else {
+			var templ_7745c5c3_Var20 string
+			templ_7745c5c3_Var20, templ_7745c5c3_Err = templ.JoinStringErrs(it.URL)
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 537, Col: 32}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var20))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 39, "</div><div class=\"queue-item-url\"><a href=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var21 templ.SafeURL
+		templ_7745c5c3_Var21, templ_7745c5c3_Err = templ.JoinURLErrs(it.URL)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 541, Col: 36}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var21))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 40, "\" target=\"_blank\" rel=\"noreferrer\" style=\"color: #999999; text-decoration: none;\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var22 string
+		templ_7745c5c3_Var22, templ_7745c5c3_Err = templ.JoinStringErrs(it.URL)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 541, Col: 127}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var22))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "</a></div><!-- Progress Bar --><div class=\"progress-bar-lcars\"><div class=\"progress-bar-fill\" style=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var23 string
+		templ_7745c5c3_Var23, templ_7745c5c3_Err = templruntime.SanitizeStyleAttributeValues("width:" + fmt.Sprintf("%.0f", it.Progress) + "%")
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 546, Col: 108}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var23))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "\"></div></div><div class=\"queue-item-progress\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var24 string
+		templ_7745c5c3_Var24, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%.0f%%", it.Progress))
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 549, Col: 56}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var24))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, " COMPLETE ")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		if it.Duration > 0 {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "<span style=\"margin-left: 12px;\">DURATION: ")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var25 string
+			templ_7745c5c3_Var25, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%dm%02ds", it.Duration/60, it.Duration%60))
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 551, Col: 124}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var25))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "</span>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, "</div>")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		if it.Error != "" {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "<div style=\"background-color: #cc6677; color: white; padding: 4px; margin-top: 6px; font-size: 10px; border: 1px solid #ff9999;\">ERROR: ")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var26 string
+			templ_7745c5c3_Var26, templ_7745c5c3_Err = templ.JoinStringErrs(it.Error)
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 557, Col: 41}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var26))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, "</div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 49, "</div><!-- Status and Actions --><div class=\"queue-item-actions\"><!-- Status Badge -->")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		if it.State == download.StateQueued {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 50, "<div class=\"lcars-element centered\" style=\"padding: 8px; background-color: #FFCC99; color: black; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #FFCC99;\">QUEUED</div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else if it.State == download.StateDownloading {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "<div class=\"lcars-element centered\" style=\"padding: 8px; background-color: #99CCFF; color: black; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #99CCFF;\">ACTIVE</div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else if it.State == download.StateCompleted {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 52, "<div class=\"lcars-element centered\" style=\"padding: 8px; background-color: #99CC99; color: black; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #99CC99;\">COMPLETE</div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else if it.State == download.StateFailed {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 53, "<div class=\"lcars-element centered\" style=\"padding: 8px; background-color: #cc6677; color: white; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #cc6677;\">FAILED</div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 54, "<div class=\"lcars-element centered\" style=\"padding: 8px; background-color: #666666; color: #999999; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #666666;\">UNKNOWN</div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 55, "<!-- Actions -->")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		if it.State == download.StateCompleted && it.Filename != "" {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 56, "<a href=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var27 templ.SafeURL
+			templ_7745c5c3_Var27, templ_7745c5c3_Err = templ.JoinURLErrs(templ.SafeURL("/api/download_file?id=" + it.ID))
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 579, Col: 77}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var27))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 57, "\" class=\"lcars-element button\" style=\"padding: 8px 10px; background-color: #FFCC99; color: black; text-decoration: none; font-size: 10px; font-weight: bold; text-align: center; border: 1px solid #FFCC99; border-radius: 4px; transition: background-color 0.2s ease;\">RETRIEVE</a> ")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		}
+		if it.State != download.StateDownloading {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 58, "<form hx-post=\"/dashboard-lcars/remove\" hx-target=\"#remove-status\" hx-swap=\"innerHTML\" style=\"display: block;\"><input type=\"hidden\" name=\"id\" value=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var28 string
+			templ_7745c5c3_Var28, templ_7745c5c3_Err = templ.JoinStringErrs(it.ID)
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 583, Col: 68}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var28))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 59, "\"> <button type=\"submit\" class=\"lcars-element button\" style=\"padding: 8px 10px; background-color: #cc6677; color: white; border: 1px solid #cc6677; cursor: pointer; width: 100%; font-size: 10px; font-weight: bold; border-radius: 4px; transition: background-color 0.2s ease;\" hx-confirm=\"CONFIRM DELETION OF THIS RECORD?\">PURGE</button></form>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 60, "<div class=\"lcars-element\" style=\"padding: 8px 10px; background-color: #333333; color: #666666; font-size: 10px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #333333;\">LOCKED</div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 61, "</div></div></div>")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		return nil
+	})
+}
+
 var _ = templruntime.GeneratedTemplate

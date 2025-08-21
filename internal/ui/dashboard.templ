@@ -223,3 +223,370 @@ templ QueueRows(items []*download.Item) {
         </tr>
     }
 }
+
+// DashboardLCARS renders the full HTML page containing the enqueue form
+// and the queue table in LCARS style
+templ DashboardLCARS(items []*download.Item) {
+    <!DOCTYPE html>
+    <html lang="en">
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>VideoFetch LCARS Interface</title>
+            <link rel="icon" type="image/x-icon" href="/static/App.ico">
+            <script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2" crossorigin="anonymous"></script>
+            <link rel="stylesheet" href="/static/lcars.css">
+            <script src="/static/lcars_audio.js"></script>
+            <style>
+                body {
+                    margin: 0;
+                    padding: 0;
+                    background-color: #000000;
+                    font-family: "Helvetica", "Arial", sans-serif;
+                    color: #FFFF99;
+                    overflow-x: hidden;
+                    height: 100vh;
+                }
+                .status-message {
+                    margin: 8px 0;
+                }
+                .progress-bar-lcars {
+                    background-color: #222222;
+                    height: 12px;
+                    border: 1px solid #666666;
+                    margin: 6px 0;
+                    position: relative;
+                    border-radius: 6px;
+                    overflow: hidden;
+                }
+                .progress-bar-fill {
+                    height: 100%;
+                    background: linear-gradient(90deg, #FFCC99 0%, #FF9966 100%);
+                    transition: width 0.3s ease;
+                    border: none;
+                    border-radius: 6px;
+                }
+                .thumbnail-container {
+                    width: 90px;
+                    height: 68px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    background-color: #333333;
+                    border: 1px solid #666666;
+                    border-radius: 6px;
+                    overflow: hidden;
+                }
+                .thumbnail-img {
+                    max-width: 88px;
+                    max-height: 66px;
+                    object-fit: cover;
+                    border-radius: 4px;
+                }
+                .queue-item {
+                    margin-bottom: 12px;
+                    border: 2px solid #666666;
+                    background-color: #111111;
+                    border-radius: 8px;
+                    transition: border-color 0.3s ease;
+                }
+                .queue-item:hover {
+                    border-color: #FFCC99;
+                }
+                .queue-item-content {
+                    padding: 16px;
+                    display: flex;
+                    gap: 16px;
+                    align-items: flex-start;
+                }
+                .queue-item-main {
+                    flex: 1;
+                    min-width: 0;
+                }
+                .queue-item-title {
+                    font-weight: bold;
+                    font-size: 15px;
+                    margin-bottom: 6px;
+                    color: #FFCC99;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    line-height: 1.2;
+                }
+                .queue-item-url {
+                    font-size: 11px;
+                    color: #999999;
+                    margin-bottom: 10px;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+                .queue-item-progress {
+                    font-size: 12px;
+                    color: #CCCCCC;
+                    margin-top: 6px;
+                    font-weight: bold;
+                }
+                .queue-item-actions {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 6px;
+                    min-width: 90px;
+                    align-items: stretch;
+                }
+                .lcars-app-container {
+                    height: 100vh;
+                    position: relative;
+                    overflow: hidden;
+                }
+                .status-message {
+                    margin: 8px 0;
+                    padding: 8px;
+                    border-radius: 4px;
+                    background-color: rgba(255, 204, 153, 0.1);
+                    border: 1px solid #FFCC99;
+                    font-size: 12px;
+                }
+                .htmx-indicator {
+                    display: none;
+                }
+                .htmx-request .htmx-indicator {
+                    display: inline;
+                    color: #FFCC99;
+                    font-weight: bold;
+                }
+            </style>
+            <script>
+                // HTMX error handling
+                document.addEventListener('DOMContentLoaded', function() {
+                    let errorCount = 0;
+                    let maxErrors = 3;
+                    let isServerDown = false;
+                    let currentInterval = 2;
+                    const originalInterval = 2;
+                    const maxInterval = 30;
+                    
+                    function updatePollingInterval(intervalSeconds) {
+                        const queueDiv = document.getElementById('queue');
+                        if (queueDiv && !isServerDown) {
+                            queueDiv.setAttribute('hx-trigger', `load, every ${intervalSeconds}s, refresh`);
+                            htmx.process(queueDiv);
+                        }
+                    }
+                    
+                    document.body.addEventListener('htmx:sendError', function(evt) {
+                        errorCount++;
+                        console.log(`HTMX request failed (${errorCount}/${maxErrors}):`, evt.detail);
+                        
+                        if (errorCount >= maxErrors && !isServerDown) {
+                            isServerDown = true;
+                            const queueDiv = document.getElementById('queue');
+                            if (queueDiv) {
+                                queueDiv.removeAttribute('hx-trigger');
+                                queueDiv.innerHTML = '<div style="text-align: center; padding: 40px;"><div style="background-color: #cc6677; color: white; padding: 16px; border: 2px solid #ff6677; margin-bottom: 16px;"><div style="font-size: 18px; font-weight: bold; margin-bottom: 8px;">⚠️ CONNECTION TO STARFLEET COMMAND LOST</div><div style="font-size: 12px; opacity: 0.9;">COMMUNICATION ARRAY OFFLINE - REFRESH WHEN CONNECTION RESTORED</div></div></div>';
+                            }
+                        } else if (errorCount > 0 && !isServerDown) {
+                            currentInterval = Math.min(currentInterval * 2, maxInterval);
+                            updatePollingInterval(currentInterval);
+                        }
+                    });
+                    
+                    document.body.addEventListener('htmx:afterRequest', function(evt) {
+                        if (evt.detail.successful) {
+                            if (errorCount > 0) {
+                                errorCount = 0;
+                                currentInterval = originalInterval;
+                                updatePollingInterval(currentInterval);
+                            }
+                            if (isServerDown) {
+                                isServerDown = false;
+                                location.reload();
+                            }
+                        }
+                    });
+                });
+            </script>
+        </head>
+        <body>
+            <div class="lcars-app-container">
+                <!-- HEADER -->
+                <div id="header" class="lcars-row header">
+                    <div class="lcars-elbow left-bottom lcars-golden-tanoi-bg"></div>
+                    <div class="lcars-bar horizontal">
+                        <div class="lcars-title right">VIDEOFETCH COMMAND INTERFACE</div>
+                    </div>
+                    <div class="lcars-bar horizontal right-end decorated"></div>
+                </div>
+
+                <!-- SIDE MENU -->
+                <div id="left-menu" class="lcars-column start-space lcars-u-1">
+                    <div class="lcars-element button lcars-chestnut-rose-bg" style="margin-bottom: 0.25rem;">MAIN OPS</div>
+                    <div class="lcars-element button lcars-pale-canary-bg" style="margin-bottom: 0.25rem;">QUEUE</div>
+                    <div class="lcars-element button" style="margin-bottom: 0.25rem;">DOWNLOADS</div>
+                    <div class="lcars-element button" style="margin-bottom: 0.25rem;">STATUS</div>
+                    <div class="lcars-element button" style="margin-bottom: 0.25rem;">SETTINGS</div>
+                    <a href="/dashboard" style="text-decoration: none; color: inherit;"><div class="lcars-element button lcars-lavender-purple-bg" style="margin-bottom: 0.25rem;">CLASSIC UI</div></a>
+                    <div class="lcars-bar lcars-u-1" style="flex-grow: 1;"></div>
+                </div>
+
+                <!-- FOOTER -->
+                <div id="footer" class="lcars-row">
+                    <div class="lcars-elbow left-top lcars-golden-tanoi-bg"></div>
+                    <div class="lcars-bar horizontal both-divider bottom"></div>
+                    <div class="lcars-bar horizontal right-end left-divider bottom"></div>
+                </div>
+
+                <!-- MAIN CONTAINER -->
+                <div id="container" style="flex: 1; display: flex; flex-direction: column; padding: 16px; gap: 16px; margin-left: 200px; margin-top: 80px; margin-bottom: 80px; overflow-y: auto;">
+                    <!-- URL INPUT SECTION -->
+                    <div class="lcars-input-section" style="background-color: #1a1a1a; border: 2px solid #FFCC99; padding: 16px; border-radius: 8px;">
+                        <div class="lcars-text-box big" style="margin-bottom: 12px; color: #FFCC99; font-size: 16px; font-weight: bold;">MEDIA ACQUISITION PROTOCOL</div>
+                        <form hx-post="/dashboard-lcars/enqueue" hx-target="#enqueue-status" hx-swap="innerHTML" style="display: flex; gap: 12px; align-items: center;">
+                            <input type="url" name="url" placeholder="ENTER MEDIA RESOURCE LOCATOR" required class="lcars-text-input decorated" style="flex: 1; padding: 12px; font-size: 14px; background-color: #000000; color: #FFCC99; border: 1px solid #FFCC99; border-radius: 4px;" />
+                            <button type="submit" class="lcars-element button lcars-atomic-tangerine-bg" style="padding: 12px 20px; cursor: pointer; background-color: #FF9966; color: #000000; font-weight: bold; border: none; border-radius: 4px;">ENGAGE</button>
+                        </form>
+                        <div id="enqueue-status" class="status-message"></div>
+                        <div id="remove-status" class="status-message"></div>
+                    </div>
+
+                    <!-- CONTROLS SECTION -->
+                    <div class="lcars-controls-section" style="background-color: #1a1a1a; border: 2px solid #99CCFF; padding: 12px; border-radius: 8px;">
+                        <form id="controls-form" hx-get="/dashboard-lcars/rows" hx-target="#queue" hx-trigger="change" hx-swap="innerHTML" style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+                            <div class="lcars-text-box" style="color: #99CCFF; font-weight: bold;">FILTER CONTROLS:</div>
+                            <label style="display: flex; align-items: center; gap: 8px;">
+                                <span style="color: #99CCFF; font-weight: bold;">STATUS:</span>
+                                <select name="status" class="lcars-text-input" style="padding: 6px; background-color: #000000; color: #99CCFF; border: 1px solid #99CCFF; border-radius: 4px;">
+                                    <option value="">ALL</option>
+                                    <option value="queued">QUEUED</option>
+                                    <option value="downloading">DOWNLOADING</option>
+                                    <option value="completed">COMPLETED</option>
+                                    <option value="failed">FAILED</option>
+                                </select>
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 8px;">
+                                <span style="color: #99CCFF; font-weight: bold;">SORT:</span>
+                                <select name="sort" class="lcars-text-input" style="padding: 6px; background-color: #000000; color: #99CCFF; border: 1px solid #99CCFF; border-radius: 4px;">
+                                    <option value="">DEFAULT</option>
+                                    <option value="date">DATE</option>
+                                    <option value="status">STATUS</option>
+                                    <option value="title">TITLE</option>
+                                    <option value="progress">PROGRESS</option>
+                                </select>
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 8px;">
+                                <span style="color: #99CCFF; font-weight: bold;">ORDER:</span>
+                                <select name="order" class="lcars-text-input" style="padding: 6px; background-color: #000000; color: #99CCFF; border: 1px solid #99CCFF; border-radius: 4px;">
+                                    <option value="desc">DESC</option>
+                                    <option value="asc">ASC</option>
+                                </select>
+                            </label>
+                        </form>
+                    </div>
+
+                    <!-- QUEUE DISPLAY -->
+                    <div class="lcars-queue-section" style="flex: 1; background-color: #1a1a1a; border: 2px solid #99FFCC; border-radius: 8px; overflow: hidden; display: flex; flex-direction: column;">
+                        <div style="padding: 16px; background-color: #2a2a2a; border-bottom: 1px solid #99FFCC;">
+                            <div class="lcars-text-box large" style="color: #99FFCC; font-size: 18px; font-weight: bold; margin: 0;">DOWNLOAD QUEUE STATUS</div>
+                        </div>
+                        <div id="queue" hx-get="/dashboard-lcars/rows" hx-trigger="load, every 2s, refresh" hx-include="#controls-form" hx-target="#queue" hx-swap="innerHTML" style="flex: 1; overflow-y: auto; padding: 16px;">
+                            @QueueTableLCARS(items)
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <audio id="audDummy"/>
+        </body>
+    </html>
+}
+
+// QueueTableLCARS renders the queue in LCARS style
+templ QueueTableLCARS(items []*download.Item) {
+    if len(items) == 0 {
+        <div style="text-align: center; padding: 32px; color: #CCCCCC;">
+            <div class="lcars-text-box large">NO ACTIVE DOWNLOADS</div>
+            <div style="margin-top: 8px; font-size: 12px;">QUEUE IS EMPTY</div>
+        </div>
+    } else {
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+            for _, it := range items {
+                @QueueRowLCARS(it)
+            }
+        </div>
+    }
+}
+
+// QueueRowLCARS renders a single queue item in LCARS style
+templ QueueRowLCARS(it *download.Item) {
+    <div class="queue-item">
+        <div class="queue-item-content">
+            <!-- Thumbnail -->
+            <div class="thumbnail-container">
+                if it.ThumbnailURL != "" {
+                    <img src={ it.ThumbnailURL } alt="thumb" class="thumbnail-img" />
+                } else {
+                    <div style="color: #666; font-size: 10px; text-align: center;">NO<br/>IMAGE</div>
+                }
+            </div>
+
+            <!-- Main Content -->
+            <div class="queue-item-main">
+                <div class="queue-item-title">
+                    if it.Title != "" {
+                        { it.Title }
+                    } else {
+                        { it.URL }
+                    }
+                </div>
+                <div class="queue-item-url">
+                    <a href={ it.URL } target="_blank" rel="noreferrer" style="color: #999999; text-decoration: none;">{ it.URL }</a>
+                </div>
+                
+                <!-- Progress Bar -->
+                <div class="progress-bar-lcars">
+                    <div class="progress-bar-fill" style={ "width:" + fmt.Sprintf("%.0f", it.Progress) + "%" }></div>
+                </div>
+                <div class="queue-item-progress">
+                    { fmt.Sprintf("%.0f%%", it.Progress) } COMPLETE
+                    if it.Duration > 0 {
+                        <span style="margin-left: 12px;">DURATION: { fmt.Sprintf("%dm%02ds", it.Duration/60, it.Duration%60) }</span>
+                    }
+                </div>
+                
+                if it.Error != "" {
+                    <div style="background-color: #cc6677; color: white; padding: 4px; margin-top: 6px; font-size: 10px; border: 1px solid #ff9999;">
+                        ERROR: { it.Error }
+                    </div>
+                }
+            </div>
+
+            <!-- Status and Actions -->
+            <div class="queue-item-actions">
+                <!-- Status Badge -->
+                if it.State == download.StateQueued {
+                    <div class="lcars-element centered" style="padding: 8px; background-color: #FFCC99; color: black; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #FFCC99;">QUEUED</div>
+                } else if it.State == download.StateDownloading {
+                    <div class="lcars-element centered" style="padding: 8px; background-color: #99CCFF; color: black; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #99CCFF;">ACTIVE</div>
+                } else if it.State == download.StateCompleted {
+                    <div class="lcars-element centered" style="padding: 8px; background-color: #99CC99; color: black; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #99CC99;">COMPLETE</div>
+                } else if it.State == download.StateFailed {
+                    <div class="lcars-element centered" style="padding: 8px; background-color: #cc6677; color: white; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #cc6677;">FAILED</div>
+                } else {
+                    <div class="lcars-element centered" style="padding: 8px; background-color: #666666; color: #999999; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #666666;">UNKNOWN</div>
+                }
+
+                <!-- Actions -->
+                if it.State == download.StateCompleted && it.Filename != "" {
+                    <a href={ templ.SafeURL("/api/download_file?id=" + it.ID) } class="lcars-element button" style="padding: 8px 10px; background-color: #FFCC99; color: black; text-decoration: none; font-size: 10px; font-weight: bold; text-align: center; border: 1px solid #FFCC99; border-radius: 4px; transition: background-color 0.2s ease;">RETRIEVE</a>
+                }
+                if it.State != download.StateDownloading {
+                    <form hx-post="/dashboard-lcars/remove" hx-target="#remove-status" hx-swap="innerHTML" style="display: block;">
+                        <input type="hidden" name="id" value={ it.ID } />
+                        <button type="submit" class="lcars-element button" style="padding: 8px 10px; background-color: #cc6677; color: white; border: 1px solid #cc6677; cursor: pointer; width: 100%; font-size: 10px; font-weight: bold; border-radius: 4px; transition: background-color 0.2s ease;" hx-confirm="CONFIRM DELETION OF THIS RECORD?">PURGE</button>
+                    </form>
+                } else {
+                    <div class="lcars-element" style="padding: 8px 10px; background-color: #333333; color: #666666; font-size: 10px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #333333;">LOCKED</div>
+                }
+            </div>
+        </div>
+    </div>
+}
