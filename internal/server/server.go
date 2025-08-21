@@ -126,57 +126,53 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "invalid_request"})
 			return
 		}
-		ids := make([]string, 0, len(req.URLs))
 		dbIDs := make([]int64, 0, len(req.URLs))
+		validURLCount := 0
+		duplicateCount := 0
+		
 		for _, u := range req.URLs {
 			if !validURL(u) {
 				continue
 			}
+			validURLCount++
+			
 			// If store available, check for duplicates and skip completed URLs
 			if st != nil {
 				if completed, err := st.IsURLCompleted(r.Context(), u); err == nil && completed {
+					duplicateCount++
 					continue // Skip already completed URLs silently
 				}
 			}
 			var dbid int64
-			var title string
-			var dur int64
-			var thumb string
 			if storeCreate != nil {
-				if mi, err := download.FetchMediaInfo(u); err == nil {
-					title, dur, thumb = mi.Title, mi.DurationSec, mi.ThumbnailURL
-				} else {
-					title = u
-				}
-				if idv, err := storeCreate(r.Context(), u, title, dur, thumb, "pending", 0); err == nil {
+				// Fast insertion: store as pending with URL as title, no metadata fetching
+				if idv, err := storeCreate(r.Context(), u, u, 0, "", "pending", 0); err == nil {
 					dbid = idv
+					dbIDs = append(dbIDs, dbid)
 				} else {
 					log.Printf("db create error: %v", err)
 				}
 			}
-			id, err := mgr.Enqueue(u)
-			if err != nil {
-				log.Printf("enqueue error for %s: %v", u, err)
-				continue
-			}
-			ids = append(ids, id)
-			if dbid > 0 {
-				mgr.AttachDB(id, dbid)
-				if title != "" || dur > 0 || thumb != "" {
-					mgr.SetMeta(id, title, dur, thumb)
-				}
-				dbIDs = append(dbIDs, dbid)
-			}
+			// Note: We intentionally don't call mgr.Enqueue here anymore
+			// The worker pool will pick up pending URLs from the database
 		}
-		if len(ids) == 0 {
+		
+		if validURLCount == 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "no_valid_urls"})
 			return
 		}
-		if len(dbIDs) > 0 {
-			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "enqueued", "ids": ids, "db_ids": dbIDs})
+		
+		if len(dbIDs) == 0 && duplicateCount > 0 {
+			// All valid URLs were duplicates - return success
+			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "all_already_completed", "duplicates": duplicateCount})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "enqueued", "ids": ids})
+		
+		response := map[string]any{"status": "success", "message": "enqueued", "db_ids": dbIDs}
+		if duplicateCount > 0 {
+			response["duplicates_skipped"] = duplicateCount
+		}
+		writeJSON(w, http.StatusOK, response)
 	}))
 
 	mux.HandleFunc("/api/status", with(rl, func(w http.ResponseWriter, r *http.Request) {
@@ -285,7 +281,14 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "downloads": items})
+			
+			// Log the JSON response for debugging
+			response := map[string]any{"status": "success", "downloads": items}
+			if jsonBytes, err := json.Marshal(response); err == nil {
+				log.Printf("/api/downloads response: %s", string(jsonBytes))
+			}
+			
+			writeJSON(w, http.StatusOK, response)
 		}))
 	}
 
