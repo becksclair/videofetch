@@ -212,14 +212,14 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "invalid_id"})
 				return
 			}
-			
+
 			// Get download record to find filename
 			items, err := st.ListDownloads(r.Context(), store.ListFilter{})
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
 				return
 			}
-			
+
 			var filename string
 			for _, item := range items {
 				if item.ID == id {
@@ -227,12 +227,12 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 					break
 				}
 			}
-			
+
 			if filename == "" {
 				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "file_not_found"})
 				return
 			}
-			
+
 			// Check if file exists in output directory
 			fullPath := filepath.Join(outputDir, filename)
 			if _, err := os.Stat(fullPath); os.IsNotExist(err) {
@@ -243,7 +243,7 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
 				return
 			}
-			
+
 			// Serve the file
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 			http.ServeFile(w, r, fullPath)
@@ -544,12 +544,12 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				var title string
 				var dur int64
 				var thumb string
-				
+
 				// Create initial DB record with URL as title
 				if idv, err := storeCreate(context.Background(), u, u, 0, "", "pending", 0); err == nil {
 					dbid = idv
 					mgr.AttachDB(id, dbid)
-					
+
 					// Fetch metadata asynchronously
 					if mi, err := download.FetchMediaInfo(u); err == nil {
 						title, dur, thumb = mi.Title, mi.DurationSec, mi.ThumbnailURL
@@ -567,13 +567,13 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		// Return immediate success response with auto-clear and trigger queue refresh
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		
+
 		// Generate response with success message and script to refresh queue
 		response := `<div class="text-green-600 text-sm">✓ Video queued successfully <script>
 			setTimeout(() => document.getElementById('enqueue-status').innerHTML = '', 3000);
 			htmx.trigger('#queue', 'refresh');
 		</script></div>`
-		
+
 		_, _ = w.Write([]byte(response))
 	}))
 
@@ -585,14 +585,14 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		if err := r.ParseForm(); err != nil {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Invalid form data</div>`))
+			_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Invalid form data</div>`))
 			return
 		}
 		u := strings.TrimSpace(r.Form.Get("url"))
 		if !validURL(u) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Invalid URL</div>`))
+			_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Invalid URL</div>`))
 			return
 		}
 
@@ -603,13 +603,13 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			switch err.Error() {
 			case "queue_full":
 				w.WriteHeader(http.StatusTooManyRequests)
-				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Queue is full, try again later</div>`))
+				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Queue is full, try again later</div>`))
 			case "shutting_down":
 				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Service is shutting down</div>`))
+				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Service is shutting down</div>`))
 			default:
 				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Internal error</div>`))
+				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Internal error</div>`))
 			}
 			return
 		}
@@ -621,12 +621,12 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				var title string
 				var dur int64
 				var thumb string
-				
+
 				// Create initial DB record with URL as title
 				if idv, err := storeCreate(context.Background(), u, u, 0, "", "pending", 0); err == nil {
 					dbid = idv
 					mgr.AttachDB(id, dbid)
-					
+
 					// Fetch metadata asynchronously
 					if mi, err := download.FetchMediaInfo(u); err == nil {
 						title, dur, thumb = mi.Title, mi.DurationSec, mi.ThumbnailURL
@@ -644,13 +644,13 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		// Return immediate success response with auto-clear and trigger queue refresh
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		
+
 		// Generate response with success message and script to refresh queue
-		response := `<div class="lcars-element left-rounded" style="background-color: #99cc99; color: black; padding: 8px;">✓ Video queued successfully <script>
-			setTimeout(() => document.getElementById('enqueue-status').innerHTML = '', 3000);
-			htmx.trigger('#queue', 'refresh');
-		</script></div>`
-		
+		response := `<div class="rounded bg-[#99cc99] text-black p-2">✓ Video queued successfully <script>
+            setTimeout(() => document.getElementById('enqueue-status').innerHTML = '', 3000);
+            htmx.trigger('#queue', 'refresh');
+        </script></div>`
+
 		_, _ = w.Write([]byte(response))
 	}))
 
@@ -675,7 +675,7 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Invalid ID</div>`))
 				return
 			}
-			
+
 			if err := st.DeleteDownload(r.Context(), id); err != nil {
 				log.Printf("delete download id=%d: %v", id, err)
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -683,7 +683,7 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Failed to remove item</div>`))
 				return
 			}
-			
+
 			// Return success response and trigger queue refresh
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
@@ -702,7 +702,7 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			if err := r.ParseForm(); err != nil {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Invalid form data</div>`))
+				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Invalid form data</div>`))
 				return
 			}
 			idStr := strings.TrimSpace(r.Form.Get("id"))
@@ -710,25 +710,25 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id <= 0 {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Invalid ID</div>`))
+				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Invalid ID</div>`))
 				return
 			}
-			
+
 			if err := st.DeleteDownload(r.Context(), id); err != nil {
 				log.Printf("delete download id=%d: %v", id, err)
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`<div class="lcars-element left-rounded" style="background-color: #cc6677; color: white; padding: 8px;">Failed to remove item</div>`))
+				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Failed to remove item</div>`))
 				return
 			}
-			
+
 			// Return success response and trigger queue refresh
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
-			response := `<div class="lcars-element left-rounded" style="background-color: #99cc99; color: black; padding: 8px;">✓ Item removed <script>
-				setTimeout(() => document.getElementById('remove-status').innerHTML = '', 2000);
-				htmx.trigger('#queue', 'refresh');
-			</script></div>`
+			response := `<div class="rounded bg-[#99cc99] text-black p-2">✓ Item removed <script>
+            setTimeout(() => document.getElementById('remove-status').innerHTML = '', 2000);
+            htmx.trigger('#queue', 'refresh');
+        </script></div>`
 			_, _ = w.Write([]byte(response))
 		}))
 	}

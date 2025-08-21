@@ -51,7 +51,7 @@ type Item struct {
 
 	// Optional database binding for persistence updates.
 	DBID int64 `json:"db_id,omitempty"`
-	
+
 	// Filename gets set when download is complete.
 	Filename string `json:"filename,omitempty"`
 

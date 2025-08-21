@@ -71,13 +71,13 @@ CREATE INDEX IF NOT EXISTS idx_downloads_created_at ON downloads(created_at);
 	if err != nil {
 		return err
 	}
-	
+
 	// Add filename column if it doesn't exist (migration for existing DBs)
 	_, err = db.Exec(`ALTER TABLE downloads ADD COLUMN filename TEXT`)
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
-	
+
 	return nil
 }
 

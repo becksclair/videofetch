@@ -81,6 +81,18 @@ templ Dashboard(items []*download.Item) {
                             errorCount++;
                         }
                     });
+                    
+                    // Update progress bars from data attributes
+                    function updateProgressBars() {
+                        document.querySelectorAll('.bar[data-progress]').forEach(function(bar) {
+                            const progress = bar.getAttribute('data-progress');
+                            bar.style.width = progress + '%';
+                        });
+                    }
+                    
+                    // Update progress bars on load and after HTMX requests
+                    updateProgressBars();
+                    document.body.addEventListener('htmx:afterSwap', updateProgressBars);
                 });
             </script>
         </head>
@@ -181,7 +193,7 @@ templ QueueRows(items []*download.Item) {
                 }
             </td>
             <td class="p-2 border-b border-gray-200 align-middle">
-                <div class="progress"><div class="bar" style={ "width:" + fmt.Sprintf("%.0f", it.Progress) + "%" }></div></div>
+                <div class="progress"><div class="bar" data-progress={ fmt.Sprintf("%.0f", it.Progress) }></div></div>
                 <span class="pct">{ fmt.Sprintf("%.0f%%", it.Progress) }</span>
             </td>
             <td class="p-2 border-b border-gray-200 align-middle">
@@ -202,7 +214,7 @@ templ QueueRows(items []*download.Item) {
                         <form hx-post="/dashboard/remove" 
                               hx-target="#remove-status" 
                               hx-swap="innerHTML" 
-                              style="display: inline;">
+                              class="inline-form">
                             <input type="hidden" name="id" value={ it.ID } />
                             <button type="submit" 
                                     class="action-btn remove-btn" 
@@ -235,127 +247,11 @@ templ DashboardLCARS(items []*download.Item) {
             <title>VideoFetch LCARS Interface</title>
             <link rel="icon" type="image/x-icon" href="/static/App.ico">
             <script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2" crossorigin="anonymous"></script>
+            <!-- Tailwind build (utilities + project styles) -->
+            <link rel="stylesheet" href="/static/style.css">
+            <!-- LCARS structural styles (elbows/bars/units) -->
             <link rel="stylesheet" href="/static/lcars.css">
             <script src="/static/lcars_audio.js"></script>
-            <style>
-                body {
-                    margin: 0;
-                    padding: 0;
-                    background-color: #000000;
-                    font-family: "Helvetica", "Arial", sans-serif;
-                    color: #FFFF99;
-                    overflow-x: hidden;
-                    height: 100vh;
-                }
-                .status-message {
-                    margin: 8px 0;
-                }
-                .progress-bar-lcars {
-                    background-color: #222222;
-                    height: 12px;
-                    border: 1px solid #666666;
-                    margin: 6px 0;
-                    position: relative;
-                    border-radius: 6px;
-                    overflow: hidden;
-                }
-                .progress-bar-fill {
-                    height: 100%;
-                    background: linear-gradient(90deg, #FFCC99 0%, #FF9966 100%);
-                    transition: width 0.3s ease;
-                    border: none;
-                    border-radius: 6px;
-                }
-                .thumbnail-container {
-                    width: 90px;
-                    height: 68px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    background-color: #333333;
-                    border: 1px solid #666666;
-                    border-radius: 6px;
-                    overflow: hidden;
-                }
-                .thumbnail-img {
-                    max-width: 88px;
-                    max-height: 66px;
-                    object-fit: cover;
-                    border-radius: 4px;
-                }
-                .queue-item {
-                    margin-bottom: 12px;
-                    border: 2px solid #666666;
-                    background-color: #111111;
-                    border-radius: 8px;
-                    transition: border-color 0.3s ease;
-                }
-                .queue-item:hover {
-                    border-color: #FFCC99;
-                }
-                .queue-item-content {
-                    padding: 16px;
-                    display: flex;
-                    gap: 16px;
-                    align-items: flex-start;
-                }
-                .queue-item-main {
-                    flex: 1;
-                    min-width: 0;
-                }
-                .queue-item-title {
-                    font-weight: bold;
-                    font-size: 15px;
-                    margin-bottom: 6px;
-                    color: #FFCC99;
-                    white-space: nowrap;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    line-height: 1.2;
-                }
-                .queue-item-url {
-                    font-size: 11px;
-                    color: #999999;
-                    margin-bottom: 10px;
-                    white-space: nowrap;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                }
-                .queue-item-progress {
-                    font-size: 12px;
-                    color: #CCCCCC;
-                    margin-top: 6px;
-                    font-weight: bold;
-                }
-                .queue-item-actions {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 6px;
-                    min-width: 90px;
-                    align-items: stretch;
-                }
-                .lcars-app-container {
-                    height: 100vh;
-                    position: relative;
-                    overflow: hidden;
-                }
-                .status-message {
-                    margin: 8px 0;
-                    padding: 8px;
-                    border-radius: 4px;
-                    background-color: rgba(255, 204, 153, 0.1);
-                    border: 1px solid #FFCC99;
-                    font-size: 12px;
-                }
-                .htmx-indicator {
-                    display: none;
-                }
-                .htmx-request .htmx-indicator {
-                    display: inline;
-                    color: #FFCC99;
-                    font-weight: bold;
-                }
-            </style>
             <script>
                 // HTMX error handling
                 document.addEventListener('DOMContentLoaded', function() {
@@ -383,7 +279,7 @@ templ DashboardLCARS(items []*download.Item) {
                             const queueDiv = document.getElementById('queue');
                             if (queueDiv) {
                                 queueDiv.removeAttribute('hx-trigger');
-                                queueDiv.innerHTML = '<div style="text-align: center; padding: 40px;"><div style="background-color: #cc6677; color: white; padding: 16px; border: 2px solid #ff6677; margin-bottom: 16px;"><div style="font-size: 18px; font-weight: bold; margin-bottom: 8px;">⚠️ CONNECTION TO STARFLEET COMMAND LOST</div><div style="font-size: 12px; opacity: 0.9;">COMMUNICATION ARRAY OFFLINE - REFRESH WHEN CONNECTION RESTORED</div></div></div>';
+                                queueDiv.innerHTML = '<div class="flex items-center justify-center h-full min-h-[300px]"><div class="bg-[#cc6677] text-white p-6 border-2 border-[#ff6677] rounded-lg text-center max-w-md"><div class="text-[18px] font-bold mb-2">⚠️ CONNECTION TO STARFLEET COMMAND LOST</div><div class="text-[14px] opacity-90">COMMUNICATION ARRAY OFFLINE - REFRESH WHEN CONNECTION RESTORED</div></div></div>';
                             }
                         } else if (errorCount > 0 && !isServerDown) {
                             currentInterval = Math.min(currentInterval * 2, maxInterval);
@@ -404,10 +300,22 @@ templ DashboardLCARS(items []*download.Item) {
                             }
                         }
                     });
+                    
+                    // Update progress bars from data attributes
+                    function updateProgressBars() {
+                        document.querySelectorAll('.progress-bar[data-progress]').forEach(function(bar) {
+                            const progress = bar.getAttribute('data-progress');
+                            bar.style.width = progress + '%';
+                        });
+                    }
+                    
+                    // Update progress bars on load and after HTMX requests
+                    updateProgressBars();
+                    document.body.addEventListener('htmx:afterSwap', updateProgressBars);
                 });
             </script>
         </head>
-        <body>
+        <body class="m-0 p-0 bg-black text-[#FFFF99] overflow-x-hidden h-screen">
             <div class="lcars-app-container">
                 <!-- HEADER -->
                 <div id="header" class="lcars-row header">
@@ -420,13 +328,13 @@ templ DashboardLCARS(items []*download.Item) {
 
                 <!-- SIDE MENU -->
                 <div id="left-menu" class="lcars-column start-space lcars-u-1">
-                    <div class="lcars-element button lcars-chestnut-rose-bg" style="margin-bottom: 0.25rem;">MAIN OPS</div>
-                    <div class="lcars-element button lcars-pale-canary-bg" style="margin-bottom: 0.25rem;">QUEUE</div>
-                    <div class="lcars-element button" style="margin-bottom: 0.25rem;">DOWNLOADS</div>
-                    <div class="lcars-element button" style="margin-bottom: 0.25rem;">STATUS</div>
-                    <div class="lcars-element button" style="margin-bottom: 0.25rem;">SETTINGS</div>
-                    <a href="/dashboard" style="text-decoration: none; color: inherit;"><div class="lcars-element button lcars-lavender-purple-bg" style="margin-bottom: 0.25rem;">CLASSIC UI</div></a>
-                    <div class="lcars-bar lcars-u-1" style="flex-grow: 1;"></div>
+                    <div class="lcars-element button lcars-chestnut-rose-bg mb-1">MAIN OPS</div>
+                    <div class="lcars-element button lcars-pale-canary-bg mb-1">QUEUE</div>
+                    <div class="lcars-element button mb-1">DOWNLOADS</div>
+                    <div class="lcars-element button mb-1">STATUS</div>
+                    <div class="lcars-element button mb-1">SETTINGS</div>
+                    <a href="/dashboard" class="no-underline text-current"><div class="lcars-element button lcars-lavender-purple-bg mb-1">CLASSIC UI</div></a>
+                    <div class="lcars-bar lcars-u-1 flex-grow"></div>
                 </div>
 
                 <!-- FOOTER -->
@@ -437,25 +345,25 @@ templ DashboardLCARS(items []*download.Item) {
                 </div>
 
                 <!-- MAIN CONTAINER -->
-                <div id="container" style="flex: 1; display: flex; flex-direction: column; padding: 16px; gap: 16px; margin-left: 200px; margin-top: 80px; margin-bottom: 80px; overflow-y: auto;">
+                <div id="container" class="flex-1 flex flex-col p-4 gap-4 ml-[200px] mt-20 mb-20 overflow-y-auto">
                     <!-- URL INPUT SECTION -->
-                    <div class="lcars-input-section" style="background-color: #1a1a1a; border: 2px solid #FFCC99; padding: 16px; border-radius: 8px;">
-                        <div class="lcars-text-box big" style="margin-bottom: 12px; color: #FFCC99; font-size: 16px; font-weight: bold;">MEDIA ACQUISITION PROTOCOL</div>
-                        <form hx-post="/dashboard-lcars/enqueue" hx-target="#enqueue-status" hx-swap="innerHTML" style="display: flex; gap: 12px; align-items: center;">
-                            <input type="url" name="url" placeholder="ENTER MEDIA RESOURCE LOCATOR" required class="lcars-text-input decorated" style="flex: 1; padding: 12px; font-size: 14px; background-color: #000000; color: #FFCC99; border: 1px solid #FFCC99; border-radius: 4px;" />
-                            <button type="submit" class="lcars-element button lcars-atomic-tangerine-bg" style="padding: 12px 20px; cursor: pointer; background-color: #FF9966; color: #000000; font-weight: bold; border: none; border-radius: 4px;">ENGAGE</button>
+                    <div class="lcars-input-section bg-neutral-900 border-2 border-[#FFCC99] p-4 rounded-lg">
+                        <div class="w-full mb-3 text-[#FFCC99] text-[16px] font-bold whitespace-nowrap overflow-hidden text-ellipsis">MEDIA ACQUISITION PROTOCOL</div>
+                        <form hx-post="/dashboard-lcars/enqueue" hx-target="#enqueue-status" hx-swap="innerHTML" class="flex gap-3 items-center">
+                            <input type="url" name="url" placeholder="ENTER MEDIA RESOURCE LOCATOR" required class="flex-1 p-3 text-[14px] bg-black text-[#FFCC99] border border-[#FFCC99] rounded" />
+                            <button type="submit" class="lcars-element button lcars-atomic-tangerine-bg px-5 py-3 cursor-pointer font-bold rounded">ENGAGE</button>
                         </form>
-                        <div id="enqueue-status" class="status-message"></div>
-                        <div id="remove-status" class="status-message"></div>
+                        <div id="enqueue-status" class="my-2 p-2 rounded border border-[#FFCC99] text-xs bg-[#FFCC99]/10"></div>
+                        <div id="remove-status" class="my-2 p-2 rounded border border-[#FFCC99] text-xs bg-[#FFCC99]/10"></div>
                     </div>
 
                     <!-- CONTROLS SECTION -->
-                    <div class="lcars-controls-section" style="background-color: #1a1a1a; border: 2px solid #99CCFF; padding: 12px; border-radius: 8px;">
-                        <form id="controls-form" hx-get="/dashboard-lcars/rows" hx-target="#queue" hx-trigger="change" hx-swap="innerHTML" style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
-                            <div class="lcars-text-box" style="color: #99CCFF; font-weight: bold;">FILTER CONTROLS:</div>
-                            <label style="display: flex; align-items: center; gap: 8px;">
-                                <span style="color: #99CCFF; font-weight: bold;">STATUS:</span>
-                                <select name="status" class="lcars-text-input" style="padding: 6px; background-color: #000000; color: #99CCFF; border: 1px solid #99CCFF; border-radius: 4px;">
+                    <div class="lcars-controls-section bg-neutral-900 border-2 border-[#99CCFF] p-3 rounded-lg">
+                        <form id="controls-form" hx-get="/dashboard-lcars/rows" hx-target="#queue" hx-trigger="change" hx-swap="innerHTML" class="flex gap-4 items-center flex-wrap">
+                            <div class="lcars-text-box text-[#99CCFF] font-bold">FILTER CONTROLS:</div>
+                            <label class="flex items-center gap-2">
+                                <span class="text-[#99CCFF] font-bold">STATUS:</span>
+                                <select name="status" class="p-1 bg-black text-[#99CCFF] border border-[#99CCFF] rounded">
                                     <option value="">ALL</option>
                                     <option value="queued">QUEUED</option>
                                     <option value="downloading">DOWNLOADING</option>
@@ -463,9 +371,9 @@ templ DashboardLCARS(items []*download.Item) {
                                     <option value="failed">FAILED</option>
                                 </select>
                             </label>
-                            <label style="display: flex; align-items: center; gap: 8px;">
-                                <span style="color: #99CCFF; font-weight: bold;">SORT:</span>
-                                <select name="sort" class="lcars-text-input" style="padding: 6px; background-color: #000000; color: #99CCFF; border: 1px solid #99CCFF; border-radius: 4px;">
+                            <label class="flex items-center gap-2">
+                                <span class="text-[#99CCFF] font-bold">SORT:</span>
+                                <select name="sort" class="p-1 bg-black text-[#99CCFF] border border-[#99CCFF] rounded">
                                     <option value="">DEFAULT</option>
                                     <option value="date">DATE</option>
                                     <option value="status">STATUS</option>
@@ -473,9 +381,9 @@ templ DashboardLCARS(items []*download.Item) {
                                     <option value="progress">PROGRESS</option>
                                 </select>
                             </label>
-                            <label style="display: flex; align-items: center; gap: 8px;">
-                                <span style="color: #99CCFF; font-weight: bold;">ORDER:</span>
-                                <select name="order" class="lcars-text-input" style="padding: 6px; background-color: #000000; color: #99CCFF; border: 1px solid #99CCFF; border-radius: 4px;">
+                            <label class="flex items-center gap-2">
+                                <span class="text-[#99CCFF] font-bold">ORDER:</span>
+                                <select name="order" class="p-1 bg-black text-[#99CCFF] border border-[#99CCFF] rounded">
                                     <option value="desc">DESC</option>
                                     <option value="asc">ASC</option>
                                 </select>
@@ -484,11 +392,11 @@ templ DashboardLCARS(items []*download.Item) {
                     </div>
 
                     <!-- QUEUE DISPLAY -->
-                    <div class="lcars-queue-section" style="flex: 1; background-color: #1a1a1a; border: 2px solid #99FFCC; border-radius: 8px; overflow: hidden; display: flex; flex-direction: column;">
-                        <div style="padding: 16px; background-color: #2a2a2a; border-bottom: 1px solid #99FFCC;">
-                            <div class="lcars-text-box large" style="color: #99FFCC; font-size: 18px; font-weight: bold; margin: 0;">DOWNLOAD QUEUE STATUS</div>
+                    <div class="lcars-queue-section flex-1 bg-neutral-900 border-2 border-[#99FFCC] rounded-lg overflow-hidden flex flex-col">
+                        <div class="p-4 bg-neutral-800 border-b border-[#99FFCC]">
+                            <div class="w-full text-[#99FFCC] text-[18px] font-bold m-0 whitespace-nowrap overflow-hidden text-ellipsis">DOWNLOAD QUEUE STATUS</div>
                         </div>
-                        <div id="queue" hx-get="/dashboard-lcars/rows" hx-trigger="load, every 2s, refresh" hx-include="#controls-form" hx-target="#queue" hx-swap="innerHTML" style="flex: 1; overflow-y: auto; padding: 16px;">
+                        <div id="queue" hx-get="/dashboard-lcars/rows" hx-trigger="load, every 2s, refresh" hx-include="#controls-form" hx-target="#queue" hx-swap="innerHTML" class="flex-1 overflow-y-auto p-4">
                             @QueueTableLCARS(items)
                         </div>
                     </div>
@@ -502,12 +410,12 @@ templ DashboardLCARS(items []*download.Item) {
 // QueueTableLCARS renders the queue in LCARS style
 templ QueueTableLCARS(items []*download.Item) {
     if len(items) == 0 {
-        <div style="text-align: center; padding: 32px; color: #CCCCCC;">
+        <div class="text-center p-8 text-[#CCCCCC]">
             <div class="lcars-text-box large">NO ACTIVE DOWNLOADS</div>
-            <div style="margin-top: 8px; font-size: 12px;">QUEUE IS EMPTY</div>
+            <div class="mt-2 text-[12px]">QUEUE IS EMPTY</div>
         </div>
     } else {
-        <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div class="flex flex-col gap-[6px]">
             for _, it := range items {
                 @QueueRowLCARS(it)
             }
@@ -517,74 +425,74 @@ templ QueueTableLCARS(items []*download.Item) {
 
 // QueueRowLCARS renders a single queue item in LCARS style
 templ QueueRowLCARS(it *download.Item) {
-    <div class="queue-item">
-        <div class="queue-item-content">
+    <div class="mb-3 border-2 border-[#666666] bg-black/90 rounded-lg hover:border-[#FFCC99] transition-colors">
+        <div class="p-4 flex gap-4 items-start">
             <!-- Thumbnail -->
-            <div class="thumbnail-container">
+            <div class="w-[90px] h-[68px] flex items-center justify-center bg-neutral-800 border border-neutral-600 rounded-md overflow-hidden">
                 if it.ThumbnailURL != "" {
-                    <img src={ it.ThumbnailURL } alt="thumb" class="thumbnail-img" />
+                    <img src={ it.ThumbnailURL } alt="thumb" class="max-w-[88px] max-h-[66px] object-cover rounded" />
                 } else {
-                    <div style="color: #666; font-size: 10px; text-align: center;">NO<br/>IMAGE</div>
+                    <div class="text-[#666] text-[10px] text-center">NO<br/>IMAGE</div>
                 }
             </div>
 
             <!-- Main Content -->
-            <div class="queue-item-main">
-                <div class="queue-item-title">
+            <div class="flex-1 min-w-0">
+                <div class="font-bold text-[15px] mb-[6px] text-[#FFCC99] whitespace-nowrap overflow-hidden text-ellipsis leading-[1.2]">
                     if it.Title != "" {
                         { it.Title }
                     } else {
                         { it.URL }
                     }
                 </div>
-                <div class="queue-item-url">
-                    <a href={ it.URL } target="_blank" rel="noreferrer" style="color: #999999; text-decoration: none;">{ it.URL }</a>
+                <div class="text-[11px] text-[#999] mb-2 whitespace-nowrap overflow-hidden text-ellipsis">
+                    <a href={ it.URL } target="_blank" rel="noreferrer" class="text-[#999] no-underline">{ it.URL }</a>
                 </div>
                 
                 <!-- Progress Bar -->
-                <div class="progress-bar-lcars">
-                    <div class="progress-bar-fill" style={ "width:" + fmt.Sprintf("%.0f", it.Progress) + "%" }></div>
+                <div class="bg-neutral-800 h-3 border border-neutral-600 rounded-md overflow-hidden">
+                    <div class="h-full bg-gradient-to-r from-[#FFCC99] to-[#FF9966] transition-all progress-bar" data-progress={ fmt.Sprintf("%.0f", it.Progress) }></div>
                 </div>
-                <div class="queue-item-progress">
+                <div class="text-[12px] text-[#CCC] mt-[6px] font-bold">
                     { fmt.Sprintf("%.0f%%", it.Progress) } COMPLETE
                     if it.Duration > 0 {
-                        <span style="margin-left: 12px;">DURATION: { fmt.Sprintf("%dm%02ds", it.Duration/60, it.Duration%60) }</span>
+                        <span class="ml-3">DURATION: { fmt.Sprintf("%dm%02ds", it.Duration/60, it.Duration%60) }</span>
                     }
                 </div>
                 
                 if it.Error != "" {
-                    <div style="background-color: #cc6677; color: white; padding: 4px; margin-top: 6px; font-size: 10px; border: 1px solid #ff9999;">
+                    <div class="bg-[#cc6677] text-white p-1 mt-[6px] text-[10px] border border-[#ff9999] rounded">
                         ERROR: { it.Error }
                     </div>
                 }
             </div>
 
             <!-- Status and Actions -->
-            <div class="queue-item-actions">
+            <div class="flex flex-col gap-[6px] min-w-[90px] items-stretch">
                 <!-- Status Badge -->
                 if it.State == download.StateQueued {
-                    <div class="lcars-element centered" style="padding: 8px; background-color: #FFCC99; color: black; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #FFCC99;">QUEUED</div>
+                    <div class="px-2 py-2 bg-[#FFCC99] text-black text-[11px] font-bold text-center rounded border border-[#FFCC99]">QUEUED</div>
                 } else if it.State == download.StateDownloading {
-                    <div class="lcars-element centered" style="padding: 8px; background-color: #99CCFF; color: black; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #99CCFF;">ACTIVE</div>
+                    <div class="px-2 py-2 bg-[#99CCFF] text-black text-[11px] font-bold text-center rounded border border-[#99CCFF]">ACTIVE</div>
                 } else if it.State == download.StateCompleted {
-                    <div class="lcars-element centered" style="padding: 8px; background-color: #99CC99; color: black; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #99CC99;">COMPLETE</div>
+                    <div class="px-2 py-2 bg-[#99CC99] text-black text-[11px] font-bold text-center rounded border border-[#99CC99]">COMPLETE</div>
                 } else if it.State == download.StateFailed {
-                    <div class="lcars-element centered" style="padding: 8px; background-color: #cc6677; color: white; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #cc6677;">FAILED</div>
+                    <div class="px-2 py-2 bg-[#cc6677] text-white text-[11px] font-bold text-center rounded border border-[#cc6677]">FAILED</div>
                 } else {
-                    <div class="lcars-element centered" style="padding: 8px; background-color: #666666; color: #999999; font-size: 11px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #666666;">UNKNOWN</div>
+                    <div class="px-2 py-2 bg-[#666666] text-[#999999] text-[11px] font-bold text-center rounded border border-[#666666]">UNKNOWN</div>
                 }
 
                 <!-- Actions -->
                 if it.State == download.StateCompleted && it.Filename != "" {
-                    <a href={ templ.SafeURL("/api/download_file?id=" + it.ID) } class="lcars-element button" style="padding: 8px 10px; background-color: #FFCC99; color: black; text-decoration: none; font-size: 10px; font-weight: bold; text-align: center; border: 1px solid #FFCC99; border-radius: 4px; transition: background-color 0.2s ease;">RETRIEVE</a>
+                    <a href={ templ.SafeURL("/api/download_file?id=" + it.ID) } class="px-2 py-2 bg-[#FFCC99] text-black no-underline text-[10px] font-bold text-center rounded border border-[#FFCC99] transition-colors">RETRIEVE</a>
                 }
                 if it.State != download.StateDownloading {
-                    <form hx-post="/dashboard-lcars/remove" hx-target="#remove-status" hx-swap="innerHTML" style="display: block;">
+                    <form hx-post="/dashboard-lcars/remove" hx-target="#remove-status" hx-swap="innerHTML" class="block">
                         <input type="hidden" name="id" value={ it.ID } />
-                        <button type="submit" class="lcars-element button" style="padding: 8px 10px; background-color: #cc6677; color: white; border: 1px solid #cc6677; cursor: pointer; width: 100%; font-size: 10px; font-weight: bold; border-radius: 4px; transition: background-color 0.2s ease;" hx-confirm="CONFIRM DELETION OF THIS RECORD?">PURGE</button>
+                        <button type="submit" class="w-full px-2 py-2 bg-[#cc6677] text-white border border-[#cc6677] cursor-pointer text-[10px] font-bold rounded transition-colors" hx-confirm="CONFIRM DELETION OF THIS RECORD?">PURGE</button>
                     </form>
                 } else {
-                    <div class="lcars-element" style="padding: 8px 10px; background-color: #333333; color: #666666; font-size: 10px; font-weight: bold; text-align: center; border-radius: 4px; border: 1px solid #333333;">LOCKED</div>
+                    <div class="px-2 py-2 bg-[#333333] text-[#666666] text-[10px] font-bold text-center rounded border border-[#333333]">LOCKED</div>
                 }
             </div>
         </div>

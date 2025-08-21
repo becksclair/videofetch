@@ -85,6 +85,13 @@ body {
 	display: inline;
 }
 
+/* Inline form styling */
+.inline-form {
+	display: inline;
+}
+
+/* Progress bars will have width set via JavaScript from data-progress attribute */
+
 /* Action buttons */
 .action-btn {
 	display: inline-flex;

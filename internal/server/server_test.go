@@ -249,8 +249,8 @@ func TestDashboardRows_FilterAndSort(t *testing.T) {
 	if strings.Contains(body, "queued") { // filtered out
 		t.Fatalf("expected no queued items in filtered rows")
 	}
-	i80 := strings.Index(body, "width:80%")
-	i20 := strings.Index(body, "width:20%")
+	i80 := strings.Index(body, "data-progress=\"80\"")
+	i20 := strings.Index(body, "data-progress=\"20\"")
 	if i80 < 0 || i20 < 0 || !(i80 < i20) {
 		t.Fatalf("expected 80%% progress row before 20%% (desc). body=%q", body)
 	}
