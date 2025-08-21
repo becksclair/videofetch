@@ -297,3 +297,5 @@ node_modules
 .claude/settings.local.json
 static/style.css
 coverage.html
+
+downloads/
