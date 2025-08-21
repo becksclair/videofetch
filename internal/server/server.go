@@ -129,13 +129,13 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		dbIDs := make([]int64, 0, len(req.URLs))
 		validURLCount := 0
 		duplicateCount := 0
-		
+
 		for _, u := range req.URLs {
 			if !validURL(u) {
 				continue
 			}
 			validURLCount++
-			
+
 			// If store available, check for duplicates and skip completed URLs
 			if st != nil {
 				if completed, err := st.IsURLCompleted(r.Context(), u); err == nil && completed {
@@ -156,18 +156,18 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			// Note: We intentionally don't call mgr.Enqueue here anymore
 			// The worker pool will pick up pending URLs from the database
 		}
-		
+
 		if validURLCount == 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "no_valid_urls"})
 			return
 		}
-		
+
 		if len(dbIDs) == 0 && duplicateCount > 0 {
 			// All valid URLs were duplicates - return success
 			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "all_already_completed", "duplicates": duplicateCount})
 			return
 		}
-		
+
 		response := map[string]any{"status": "success", "message": "enqueued", "db_ids": dbIDs}
 		if duplicateCount > 0 {
 			response["duplicates_skipped"] = duplicateCount
@@ -187,6 +187,20 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 
 	// Optional DB-backed listing; only registered if store is provided via main.
 	if st != nil {
+		mux.HandleFunc("/api/retry_failed", with(rl, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w)
+				return
+			}
+			affected, err := st.RetryFailedDownloads(r.Context())
+			if err != nil {
+				log.Printf("retry failed downloads: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "retried", "count": affected})
+		}))
+
 		mux.HandleFunc("/api/remove", with(rl, func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodDelete {
 				methodNotAllowed(w)
@@ -281,13 +295,13 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
 				return
 			}
-			
+
 			// Log the JSON response for debugging
 			response := map[string]any{"status": "success", "downloads": items}
 			if jsonBytes, err := json.Marshal(response); err == nil {
 				log.Printf("/api/downloads response: %s", string(jsonBytes))
 			}
-			
+
 			writeJSON(w, http.StatusOK, response)
 		}))
 	}
@@ -664,7 +678,11 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 
 		// Generate response with success message and script to refresh queue
 		response := `<div class="rounded bg-[#99cc99] text-black p-2">✓ Video queued successfully <script>
-            setTimeout(() => document.getElementById('enqueue-status').innerHTML = '', 3000);
+            document.getElementById('enqueue-status').classList.remove('hidden');
+            setTimeout(() => {
+                document.getElementById('enqueue-status').innerHTML = '';
+                document.getElementById('enqueue-status').classList.add('hidden');
+            }, 3000);
             htmx.trigger('#queue', 'refresh');
         </script></div>`
 
@@ -743,9 +761,65 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
 			response := `<div class="rounded bg-[#99cc99] text-black p-2">✓ Item removed <script>
-            setTimeout(() => document.getElementById('remove-status').innerHTML = '', 2000);
+            document.getElementById('remove-status').classList.remove('hidden');
+            setTimeout(() => {
+                document.getElementById('remove-status').innerHTML = '';
+                document.getElementById('remove-status').classList.add('hidden');
+            }, 2000);
             htmx.trigger('#queue', 'refresh');
         </script></div>`
+			_, _ = w.Write([]byte(response))
+		}))
+
+		// Dashboard retry failed endpoint
+		mux.HandleFunc("/dashboard/retry_failed", with(rl, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w)
+				return
+			}
+			affected, err := st.RetryFailedDownloads(r.Context())
+			if err != nil {
+				log.Printf("retry failed downloads: %v", err)
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Failed to retry downloads</div>`))
+				return
+			}
+			// Return success response and trigger queue refresh
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			response := fmt.Sprintf(`<div class="text-green-600 text-sm">✓ Retried %d failed downloads <script>
+				setTimeout(() => document.getElementById('retry-status').innerHTML = '', 3000);
+				htmx.trigger('#queue', 'refresh');
+			</script></div>`, affected)
+			_, _ = w.Write([]byte(response))
+		}))
+
+		// Dashboard LCARS retry failed endpoint
+		mux.HandleFunc("/dashboard-lcars/retry_failed", with(rl, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w)
+				return
+			}
+			affected, err := st.RetryFailedDownloads(r.Context())
+			if err != nil {
+				log.Printf("retry failed downloads: %v", err)
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Failed to retry downloads</div>`))
+				return
+			}
+			// Return success response and trigger queue refresh
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			response := fmt.Sprintf(`<div class="rounded bg-[#99cc99] text-black p-2">✓ Retried %d failed downloads <script>
+				document.getElementById('retry-status').classList.remove('hidden');
+				setTimeout(() => {
+					document.getElementById('retry-status').innerHTML = '';
+					document.getElementById('retry-status').classList.add('hidden');
+				}, 3000);
+				htmx.trigger('#queue', 'refresh');
+			</script></div>`, affected)
 			_, _ = w.Write([]byte(response))
 		}))
 	}

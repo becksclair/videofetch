@@ -73,15 +73,15 @@ func main() {
 	mgr := download.NewManager(absOut, workers, queueCap)
 	mgr.SetHooks(hooks)
 	defer mgr.Shutdown()
-	
+
 	// Start database worker to process pending URLs
 	dbWorker := download.NewDBWorker(st, mgr)
-	
+
 	// Retry any incomplete downloads from previous sessions
 	if err := dbWorker.RetryIncompleteDownloads(); err != nil {
 		log.Printf("startup retry failed: %v", err)
 	}
-	
+
 	dbWorker.Start()
 	defer dbWorker.Stop()
 

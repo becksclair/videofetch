@@ -27,13 +27,13 @@ type Download struct {
 }
 
 // Implement IncompleteDownload interface for Download
-func (d *Download) GetID() int64           { return d.ID }
-func (d *Download) GetURL() string         { return d.URL }
-func (d *Download) GetTitle() string       { return d.Title }
-func (d *Download) GetDuration() int64     { return d.Duration }
+func (d *Download) GetID() int64            { return d.ID }
+func (d *Download) GetURL() string          { return d.URL }
+func (d *Download) GetTitle() string        { return d.Title }
+func (d *Download) GetDuration() int64      { return d.Duration }
 func (d *Download) GetThumbnailURL() string { return d.ThumbnailURL }
-func (d *Download) GetStatus() string      { return d.Status }
-func (d *Download) GetProgress() float64   { return d.Progress }
+func (d *Download) GetStatus() string       { return d.Status }
+func (d *Download) GetProgress() float64    { return d.Progress }
 
 // Store wraps an sql.DB and provides typed helpers.
 type Store struct {
@@ -275,19 +275,19 @@ func (s *Store) GetPendingDownloads(ctx context.Context, limit int) ([]Download,
 			  WHERE status = 'pending' 
 			  ORDER BY created_at ASC 
 			  LIMIT ?`
-	
+
 	rows, err := s.db.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var downloads []Download
 	for rows.Next() {
 		var d Download
 		var filename sql.NullString
-		err := rows.Scan(&d.ID, &d.URL, &d.Title, &d.Duration, &d.ThumbnailURL, 
-						 &d.Status, &d.Progress, &filename, &d.CreatedAt, &d.UpdatedAt)
+		err := rows.Scan(&d.ID, &d.URL, &d.Title, &d.Duration, &d.ThumbnailURL,
+			&d.Status, &d.Progress, &filename, &d.CreatedAt, &d.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -317,13 +317,13 @@ func (s *Store) GetIncompleteDownloads(ctx context.Context, limit int) ([]interf
 			  WHERE status != 'completed' OR progress < 100
 			  ORDER BY created_at ASC 
 			  LIMIT ?`
-	
+
 	rows, err := s.db.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var downloads []interface {
 		GetID() int64
 		GetURL() string
@@ -336,8 +336,8 @@ func (s *Store) GetIncompleteDownloads(ctx context.Context, limit int) ([]interf
 	for rows.Next() {
 		var d Download
 		var filename sql.NullString
-		err := rows.Scan(&d.ID, &d.URL, &d.Title, &d.Duration, &d.ThumbnailURL, 
-						 &d.Status, &d.Progress, &filename, &d.CreatedAt, &d.UpdatedAt)
+		err := rows.Scan(&d.ID, &d.URL, &d.Title, &d.Duration, &d.ThumbnailURL,
+			&d.Status, &d.Progress, &filename, &d.CreatedAt, &d.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -355,7 +355,7 @@ func (s *Store) GetPendingDownloadsForWorker(ctx context.Context, limit int) ([]
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Convert to interface{} slice of maps for the dbworker
 	result := make([]interface{}, len(downloads))
 	for i, d := range downloads {
@@ -369,6 +369,30 @@ func (s *Store) GetPendingDownloadsForWorker(ctx context.Context, limit int) ([]
 		}
 	}
 	return result, nil
+}
+
+// CountDownloadsByStatus returns the count of downloads by status
+func (s *Store) CountDownloadsByStatus(ctx context.Context, status string) (int64, error) {
+	var count int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE status = ?`, normalizeStatus(status)).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// RetryFailedDownloads resets all failed downloads back to pending status for retry
+func (s *Store) RetryFailedDownloads(ctx context.Context) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'pending', progress = 0, updated_at = CURRENT_TIMESTAMP WHERE status = 'error'`)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	log.Printf("db: retry_failed_downloads affected=%d", affected)
+	return affected, nil
 }
 
 func normalizeStatus(s string) string {
