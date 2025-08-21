@@ -62,6 +62,14 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "invalid_url"})
 			return
 		}
+		// If store available, check for duplicates first
+		if st != nil {
+			if completed, err := st.IsURLCompleted(r.Context(), req.URL); err == nil && completed {
+				// URL already completed, silently return success without enqueueing
+				writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "already_completed"})
+				return
+			}
+		}
 		// If store available, prefetch media info and create DB record first
 		var dbid int64
 		var title string
@@ -123,6 +131,12 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		for _, u := range req.URLs {
 			if !validURL(u) {
 				continue
+			}
+			// If store available, check for duplicates and skip completed URLs
+			if st != nil {
+				if completed, err := st.IsURLCompleted(r.Context(), u); err == nil && completed {
+					continue // Skip already completed URLs silently
+				}
 			}
 			var dbid int64
 			var title string

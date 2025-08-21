@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS downloads (
 );
 CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status);
 CREATE INDEX IF NOT EXISTS idx_downloads_created_at ON downloads(created_at);
+CREATE INDEX IF NOT EXISTS idx_downloads_url_status ON downloads(url, status);
 `
 	_, err := db.Exec(ddl)
 	if err != nil {
@@ -240,6 +241,19 @@ func (s *Store) DeleteDownload(ctx context.Context, id int64) error {
 	}
 	log.Printf("db: delete_download id=%d", id)
 	return nil
+}
+
+// IsURLCompleted checks if a URL already exists with status "completed"
+func (s *Store) IsURLCompleted(ctx context.Context, url string) (bool, error) {
+	if url == "" {
+		return false, errors.New("empty_url")
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE url = ? AND status = 'completed'`, url).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func normalizeStatus(s string) string {

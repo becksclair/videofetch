@@ -278,6 +278,135 @@ func TestNormalizeStatus(t *testing.T) {
 	}
 }
 
+func TestIsURLCompleted(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	testURL := "https://example.com/test-video"
+
+	// Test with non-existent URL
+	completed, err := store.IsURLCompleted(ctx, testURL)
+	if err != nil {
+		t.Fatalf("IsURLCompleted() failed: %v", err)
+	}
+	if completed {
+		t.Error("Expected false for non-existent URL")
+	}
+
+	// Create download with pending status
+	id, err := store.CreateDownload(ctx, testURL, "Test Video", 300, "", "pending", 0.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	// Should still return false for pending status
+	completed, err = store.IsURLCompleted(ctx, testURL)
+	if err != nil {
+		t.Fatalf("IsURLCompleted() failed: %v", err)
+	}
+	if completed {
+		t.Error("Expected false for pending URL")
+	}
+
+	// Update to completed status
+	err = store.UpdateStatus(ctx, id, "completed", "")
+	if err != nil {
+		t.Fatalf("UpdateStatus() failed: %v", err)
+	}
+
+	// Should now return true
+	completed, err = store.IsURLCompleted(ctx, testURL)
+	if err != nil {
+		t.Fatalf("IsURLCompleted() failed: %v", err)
+	}
+	if !completed {
+		t.Error("Expected true for completed URL")
+	}
+
+	// Test with error status - should return false
+	err = store.UpdateStatus(ctx, id, "error", "test error")
+	if err != nil {
+		t.Fatalf("UpdateStatus() failed: %v", err)
+	}
+
+	completed, err = store.IsURLCompleted(ctx, testURL)
+	if err != nil {
+		t.Fatalf("IsURLCompleted() failed: %v", err)
+	}
+	if completed {
+		t.Error("Expected false for error status URL")
+	}
+}
+
+func TestIsURLCompleted_EmptyURL(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	_, err := store.IsURLCompleted(ctx, "")
+	if err == nil {
+		t.Error("Expected error for empty URL")
+	}
+	if err.Error() != "empty_url" {
+		t.Errorf("Expected 'empty_url' error, got: %v", err)
+	}
+}
+
+func TestIsURLCompleted_MultipleURLs(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	url1 := "https://example.com/video1"
+	url2 := "https://example.com/video2"
+
+	// Create two downloads, one completed and one pending
+	id1, err := store.CreateDownload(ctx, url1, "Video 1", 300, "", "completed", 100.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+	_, err = store.CreateDownload(ctx, url2, "Video 2", 400, "", "pending", 0.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	// Test first URL - should be completed
+	completed1, err := store.IsURLCompleted(ctx, url1)
+	if err != nil {
+		t.Fatalf("IsURLCompleted() failed for url1: %v", err)
+	}
+	if !completed1 {
+		t.Error("Expected true for completed URL1")
+	}
+
+	// Test second URL - should not be completed
+	completed2, err := store.IsURLCompleted(ctx, url2)
+	if err != nil {
+		t.Fatalf("IsURLCompleted() failed for url2: %v", err)
+	}
+	if completed2 {
+		t.Error("Expected false for pending URL2")
+	}
+
+	// Create another completed entry with the same URL as url1 - should still work
+	_, err = store.CreateDownload(ctx, url1, "Video 1 Again", 300, "", "completed", 100.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	completed1Again, err := store.IsURLCompleted(ctx, url1)
+	if err != nil {
+		t.Fatalf("IsURLCompleted() failed for url1 again: %v", err)
+	}
+	if !completed1Again {
+		t.Error("Expected true for URL1 with multiple completed entries")
+	}
+
+	// Clean up the extra entry
+	_ = store.DeleteDownload(ctx, id1)
+}
+
 func setupTestStore(t *testing.T) *Store {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test.db")

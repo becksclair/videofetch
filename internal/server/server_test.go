@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"videofetch/internal/download"
+	"videofetch/internal/store"
 )
 
 // helpers
@@ -249,8 +251,8 @@ func TestDashboardRows_FilterAndSort(t *testing.T) {
 	if strings.Contains(body, "queued") { // filtered out
 		t.Fatalf("expected no queued items in filtered rows")
 	}
-	i80 := strings.Index(body, "data-progress=\"80\"")
-	i20 := strings.Index(body, "data-progress=\"20\"")
+	i80 := strings.Index(body, "data-progress=\"80.0\"")
+	i20 := strings.Index(body, "data-progress=\"20.0\"")
 	if i80 < 0 || i20 < 0 || !(i80 < i20) {
 		t.Fatalf("expected 80%% progress row before 20%% (desc). body=%q", body)
 	}
@@ -283,7 +285,119 @@ func TestHealthz_OK(t *testing.T) {
 	}
 }
 
+func TestDownloadSingle_DuplicateCompleted(t *testing.T) {
+	// Create test store with completed download
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	ctx := context.Background()
+	testURL := "https://already-completed.com/video"
+
+	// Create a completed download in the store
+	id, err := testStore.CreateDownload(ctx, testURL, "Test Video", 300, "", "completed", 100.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	mgr := &mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "should-not-be-called", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}
+
+	h := New(mgr, testStore, "/tmp/test")
+	w := doJSON(t, h, http.MethodPost, "/api/download_single", "10.0.0.100",
+		map[string]string{"url": testURL})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct{ Status, Message string }
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.Status != "success" || resp.Message != "already_completed" {
+		t.Fatalf("expected already_completed response, got: %+v", resp)
+	}
+	_ = id // avoid unused variable warning
+}
+
+func TestBatch_DuplicateFiltering(t *testing.T) {
+	// Create test store with some completed downloads
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	ctx := context.Background()
+
+	// Create completed downloads
+	_, err := testStore.CreateDownload(ctx, "https://completed1.com/video", "Video 1", 300, "", "completed", 100.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+	_, err = testStore.CreateDownload(ctx, "https://completed2.com/video", "Video 2", 400, "", "completed", 100.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	enqueueCalls := 0
+	mgr := &mockMgr{
+		enqueueFn: func(url string) (string, error) {
+			enqueueCalls++
+			return "new-id-" + string(rune('0'+enqueueCalls)), nil
+		},
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}
+
+	h := New(mgr, testStore, "/tmp/test")
+
+	body := map[string]any{
+		"urls": []string{
+			"https://completed1.com/video", // should be skipped
+			"https://new1.com/video",       // should be enqueued
+			"https://completed2.com/video", // should be skipped
+			"https://new2.com/video",       // should be enqueued
+			"invalid://url",                // should be skipped (invalid)
+		},
+	}
+
+	w := doJSON(t, h, http.MethodPost, "/api/download", "10.0.0.101", body)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Status, Message string
+		IDs             []string `json:"ids"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.Status != "success" || len(resp.IDs) != 2 {
+		t.Fatalf("expected 2 enqueued URLs, got: %+v", resp)
+	}
+
+	if enqueueCalls != 2 {
+		t.Fatalf("expected 2 enqueue calls, got %d", enqueueCalls)
+	}
+}
+
 // errString adapts a string to error without fmt.Errorf noise
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// setupTestServerStore creates an in-memory test store
+func setupTestServerStore(t *testing.T) *store.Store {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+
+	testStore, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open test store: %v", err)
+	}
+
+	return testStore
+}
