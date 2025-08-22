@@ -248,7 +248,7 @@ func (m *Manager) buildYTDLPArgs(url, outTpl string) []string {
 		"--continue",
 		"--output", outTpl,
 		"--embed-thumbnail",
-		"--embed-subs",
+		// "--embed-subs",
 		"--embed-metadata",
 		"--embed-chapters",
 		"--windows-filenames",

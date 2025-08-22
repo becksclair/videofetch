@@ -29,7 +29,7 @@ func main() {
 		dbPath    string
 	)
 
-	flag.StringVar(&outputDir, "output-dir", "", "Directory for downloaded videos (required)")
+	flag.StringVar(&outputDir, "output-dir", "", "Directory for downloaded videos (default: $HOME/Videos/videofetch)")
 	flag.IntVar(&port, "port", 8080, "Server port")
 	flag.StringVar(&host, "host", "0.0.0.0", "Host address to bind")
 	flag.IntVar(&workers, "workers", 4, "Number of concurrent download workers")
@@ -37,10 +37,7 @@ func main() {
 	flag.StringVar(&dbPath, "db", "", "Path to SQLite database (default: OS cache dir: videofetch/videofetch.db)")
 	flag.Parse()
 
-	if outputDir == "" {
-		log.Fatalf("--output-dir is required")
-	}
-	absOut, err := filepath.Abs(outputDir)
+	absOut, err := computeOutputDir(outputDir)
 	if err != nil {
 		log.Fatalf("resolve output dir: %v", err)
 	}
@@ -123,6 +120,19 @@ func main() {
 	// Close store after manager shutdown to avoid race conditions
 	st.Close()
 	log.Printf("shutdown complete")
+}
+
+// computeOutputDir returns the absolute output directory path.
+// If the provided flag value is empty, it defaults to "$HOME/Videos/videofetch".
+func computeOutputDir(flagVal string) (string, error) {
+	if flagVal == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, "Videos", "videofetch"), nil
+	}
+	return filepath.Abs(flagVal)
 }
 
 // storeHooks implements download.Hooks to persist updates.

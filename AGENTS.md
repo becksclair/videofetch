@@ -41,7 +41,7 @@ Opinionated, fast, and low‑drama defaults for coding agents working on the Vid
 ## 4) Build, Run, Test
 
 - Build: `go build -o videofetch ./cmd/videofetch`
-- Run: `./videofetch --output-dir ./downloads --port 8080 --host 0.0.0.0`
+- Run: `./videofetch --port 8080 --host 0.0.0.0` (defaults to `$HOME/Videos/videofetch`)
   - Requires `yt-dlp` on `PATH` and support for `--progress-template`.
 - **Make targets**:
   - `make run`: builds CSS + templ + runs server

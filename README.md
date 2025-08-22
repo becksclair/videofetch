@@ -12,13 +12,14 @@ Go-based web service for downloading videos via `yt-dlp` with a simple REST API,
 
 ```bash
 go build -o videofetch ./cmd/videofetch
-./videofetch --output-dir ./downloads --port 8080 --host 0.0.0.0
+# By default, outputs to $HOME/Videos/videofetch
+./videofetch --port 8080 --host 0.0.0.0
 
 ```
 
 ## CLI flags
 
-- `--output-dir` (required): output directory for downloads (created if missing)
+- `--output-dir` (optional): output directory for downloads (default: `$HOME/Videos/videofetch`, created if missing)
 - `--port` (default: `8080`)
 - `--host` (default: `0.0.0.0`)
 - `--workers` (default: `4`): concurrent download workers

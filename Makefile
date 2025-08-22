@@ -4,7 +4,7 @@ BIN ?= videofetch
 CMD ?= ./cmd/videofetch
 HOST ?= 0.0.0.0
 PORT ?= 8080
-OUTPUT_DIR ?= ./downloads
+OUTPUT_DIR ?= $(HOME)/Videos/videofetch
 
 .PHONY: build test run generate tools
 
