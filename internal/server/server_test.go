@@ -49,11 +49,12 @@ func TestDownloadSingle_Success(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
 		t.Fatalf("content-type=%s", ct)
 	}
-	var resp struct{ Status, Message, ID string }
+	var resp struct{ Status, Message string }
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Status != "success" || resp.ID != "abc123" {
+	// With async pattern, no ID is returned immediately (it's processed in background)
+	if resp.Status != "success" || resp.Message != "enqueued" {
 		t.Fatalf("resp=%+v", resp)
 	}
 }
@@ -96,44 +97,31 @@ func TestDownloadSingle_InvalidURL(t *testing.T) {
 	}
 }
 
-func TestDownloadSingle_ErrorMappings(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		code int
-		msg  string
-	}{
-		{"queue_full", errString("queue_full"), http.StatusTooManyRequests, "queue_full"},
-		{"shutting_down", errString("shutting_down"), http.StatusServiceUnavailable, "shutting_down"},
-		{"internal", errString("boom"), http.StatusInternalServerError, "internal_error"},
+// TestDownloadSingle_AsyncPattern verifies async behavior without direct Enqueue calls
+func TestDownloadSingle_AsyncPattern(t *testing.T) {
+	// With async pattern, the handler returns success immediately
+	// and doesn't call Enqueue directly (it's done via ProcessPendingDownload)
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "id", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, nil, "/tmp/test")
+	w := doJSON(t, h, http.MethodPost, "/api/download_single", "10.0.0.5", map[string]string{"url": "https://ok"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", tc.err }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
-			w := doJSON(t, h, http.MethodPost, "/api/download_single", "10.0.0.5", map[string]string{"url": "https://ok"})
-			if w.Code != tc.code {
-				t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
-			}
-			var resp map[string]any
-			_ = json.Unmarshal(w.Body.Bytes(), &resp)
-			if resp["message"] != tc.msg {
-				t.Fatalf("msg=%v", resp["message"])
-			}
-		})
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["status"] != "success" {
+		t.Fatalf("expected success status, got %v", resp["status"])
 	}
 }
 
 func TestBatch_Success_Mixed(t *testing.T) {
-	calls := 0
+	// Note: /api/download now stores to DB and doesn't directly call Enqueue
+	// Without a store, it returns success with empty db_ids
 	h := New(&mockMgr{
 		enqueueFn: func(url string) (string, error) {
-			calls++
-			if strings.Contains(url, "a") {
-				return "id-a", nil
-			}
-			if strings.Contains(url, "b") {
-				return "", errString("queue_full")
-			}
+			t.Fatal("should not call Enqueue in batch endpoint")
 			return "", nil
 		},
 		snapshotFn: func(id string) []*download.Item { return nil },
@@ -145,16 +133,14 @@ func TestBatch_Success_Mixed(t *testing.T) {
 	}
 	var resp struct {
 		Status, Message string
-		IDs             []string `json:"ids"`
+		DBIDs           []int64 `json:"db_ids"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Status != "success" || len(resp.IDs) != 1 || resp.IDs[0] != "id-a" {
+	// Without a store, no DB IDs are returned
+	if resp.Status != "success" || len(resp.DBIDs) != 0 {
 		t.Fatalf("resp=%+v", resp)
-	}
-	if calls != 2 {
-		t.Fatalf("expected 2 enqueue calls (valid URLs), got %d", calls)
 	}
 }
 
@@ -258,20 +244,18 @@ func TestDashboardRows_FilterAndSort(t *testing.T) {
 	}
 }
 
-func TestRateLimiting_Exceeds(t *testing.T) {
+// Rate limiting has been removed - this test is now just checking that
+// multiple requests succeed without rate limiting
+func TestRateLimiting_Removed(t *testing.T) {
 	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "x", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
 	ip := "203.0.113.1"
 	var last *httptest.ResponseRecorder
+	// All 61 requests should succeed now
 	for i := 0; i < 61; i++ {
 		last = doJSON(t, h, http.MethodGet, "/api/status", ip, nil)
-	}
-	if last.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429, got %d", last.Code)
-	}
-	var resp map[string]any
-	_ = json.Unmarshal(last.Body.Bytes(), &resp)
-	if resp["message"] != "rate_limited" {
-		t.Fatalf("resp=%v", resp)
+		if last.Code != http.StatusOK {
+			t.Fatalf("request %d failed with status %d", i, last.Code)
+		}
 	}
 }
 
@@ -368,20 +352,25 @@ func TestBatch_DuplicateFiltering(t *testing.T) {
 	}
 
 	var resp struct {
-		Status, Message string
-		IDs             []string `json:"ids"`
+		Status, Message   string
+		DBIDs             []int64 `json:"db_ids"`
+		DuplicatesSkipped int     `json:"duplicates_skipped,omitempty"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
 
-	if resp.Status != "success" || len(resp.IDs) != 2 {
-		t.Fatalf("expected 2 enqueued URLs, got: %+v", resp)
+	if resp.Status != "success" || len(resp.DBIDs) != 2 {
+		t.Fatalf("expected 2 db_ids for new URLs, got: %+v", resp)
 	}
 
-	if enqueueCalls != 2 {
-		t.Fatalf("expected 2 enqueue calls, got %d", enqueueCalls)
+	if resp.DuplicatesSkipped != 2 {
+		t.Fatalf("expected 2 duplicates skipped, got %d", resp.DuplicatesSkipped)
 	}
+
+	// Note: Enqueue is no longer called directly from /api/download,
+	// it's called via ProcessPendingDownload in a goroutine
+	// So we shouldn't expect immediate enqueue calls here
 }
 
 // errString adapts a string to error without fmt.Errorf noise

@@ -3,11 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
+	"videofetch/internal/logging"
 
 	_ "modernc.org/sqlite"
 )
@@ -84,6 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_downloads_url_status ON downloads(url, status);
 
 	// Add filename column if it doesn't exist (migration for existing DBs)
 	_, err = db.Exec(`ALTER TABLE downloads ADD COLUMN filename TEXT`)
+	// TODO: Replace string-based SQLite error checking with proper error types when available
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
@@ -97,7 +97,7 @@ func (s *Store) Close() error { return s.db.Close() }
 // CreateDownload inserts a new download row and returns its ID.
 func (s *Store) CreateDownload(ctx context.Context, url, title string, duration int64, thumbnail string, status string, progress float64) (int64, error) {
 	if url == "" {
-		return 0, errors.New("empty_url")
+		return 0, ErrEmptyURL
 	}
 	// normalize status
 	st := normalizeStatus(status)
@@ -111,7 +111,7 @@ VALUES (?, ?, ?, ?, ?, ?)`, url, title, duration, thumbnail, st, progress)
 	if err != nil {
 		return 0, fmt.Errorf("get insert id: %w", err)
 	}
-	log.Printf("db: create_download id=%d url=%q title=%q duration=%d status=%s progress=%.1f", id, url, title, duration, st, progress)
+	logging.LogDBCreate(id, url, title, int(duration), st, progress)
 	return id, nil
 }
 
@@ -121,7 +121,7 @@ func (s *Store) UpdateProgress(ctx context.Context, id int64, progress float64) 
 	if err != nil {
 		return err
 	}
-	log.Printf("db: update_progress id=%d progress=%.1f", id, progress)
+	logging.LogDBUpdate("update_progress", id, map[string]any{"progress": progress})
 	return nil
 }
 
@@ -132,11 +132,11 @@ func (s *Store) UpdateStatus(ctx context.Context, id int64, status string, errMs
 	if err != nil {
 		return err
 	}
+	fields := map[string]any{"status": st}
 	if errMsg != "" {
-		log.Printf("db: update_status id=%d status=%s error=%q", id, st, errMsg)
-	} else {
-		log.Printf("db: update_status id=%d status=%s", id, st)
+		fields["error"] = errMsg
 	}
+	logging.LogDBUpdate("update_status", id, fields)
 	return nil
 }
 
@@ -168,7 +168,11 @@ func (s *Store) UpdateMeta(ctx context.Context, id int64, title string, duration
 		return err
 	}
 	// Only log fields that were updated
-	log.Printf("db: update_meta id=%d title=%q duration=%d thumbnail_set=%t", id, title, duration, thumbnail != "")
+	fields := map[string]any{"title": title, "duration": duration}
+	if thumbnail != "" {
+		fields["thumbnail_set"] = true
+	}
+	logging.LogDBUpdate("update_meta", id, fields)
 	return nil
 }
 
@@ -238,7 +242,7 @@ func (s *Store) UpdateFilename(ctx context.Context, id int64, filename string) e
 	if err != nil {
 		return err
 	}
-	log.Printf("db: update_filename id=%d filename=%q", id, filename)
+	logging.LogDBUpdate("update_filename", id, map[string]any{"filename": filename})
 	return nil
 }
 
@@ -248,14 +252,14 @@ func (s *Store) DeleteDownload(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("db: delete_download id=%d", id)
+	logging.LogDBOperation("delete_download", id, nil)
 	return nil
 }
 
 // IsURLCompleted checks if a URL already exists with status "completed"
 func (s *Store) IsURLCompleted(ctx context.Context, url string) (bool, error) {
 	if url == "" {
-		return false, errors.New("empty_url")
+		return false, ErrEmptyURL
 	}
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE url = ? AND status = 'completed'`, url).Scan(&count)
@@ -391,7 +395,7 @@ func (s *Store) RetryFailedDownloads(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	log.Printf("db: retry_failed_downloads affected=%d", affected)
+	logging.LogRetryFailed(affected, nil)
 	return affected, nil
 }
 

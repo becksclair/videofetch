@@ -5,18 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
-	"net"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"videofetch/internal/download"
+	"videofetch/internal/logging"
 	"videofetch/internal/store"
 	"videofetch/internal/ui"
 )
@@ -28,25 +27,18 @@ type downloadManager interface {
 	SetMeta(id string, title string, duration int64, thumb string)
 }
 
-type rateLimiter interface {
-	Allow(key string) bool
-}
-
 // New returns an http.Handler with routes and middleware wired.
 // Minimal interface to abstract the store; nil store disables DB-backed features.
 func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
-	rl := newIPRateLimiter(60, time.Minute) // 60 req/min/IP
 	mux := http.NewServeMux()
 	// helpers
 	var storeCreate func(ctx context.Context, url, title string, duration int64, thumbnail string, status string, progress float64) (int64, error)
-	var storeUpdateMeta func(ctx context.Context, id int64, title string, duration int64, thumbnail string) error
 	if st != nil {
 		storeCreate = st.CreateDownload
-		storeUpdateMeta = st.UpdateMeta
 	}
 
 	// Routes
-	mux.HandleFunc("/api/download_single", with(rl, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/download_single", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w)
 			return
@@ -70,51 +62,42 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				return
 			}
 		}
-		// If store available, prefetch media info and create DB record first
-		var dbid int64
-		var title string
-		var dur int64
-		var thumb string
-		if storeCreate != nil {
-			if mi, err := download.FetchMediaInfo(req.URL); err == nil {
-				title, dur, thumb = mi.Title, mi.DurationSec, mi.ThumbnailURL
-			} else {
-				// Fallbacks: still create a record with URL as title
-				title = req.URL
-			}
-			if idv, err := storeCreate(r.Context(), req.URL, title, dur, thumb, "pending", 0); err == nil {
-				dbid = idv
-			} else {
-				log.Printf("db create error: %v", err)
-			}
-		}
-		id, err := mgr.Enqueue(req.URL)
-		if err != nil {
-			switch err.Error() {
-			case "queue_full":
-				writeJSON(w, http.StatusTooManyRequests, map[string]any{"status": "error", "message": "queue_full"})
-			case "shutting_down":
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "error", "message": "shutting_down"})
-			default:
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
-			}
-			return
-		}
-		if dbid > 0 {
-			mgr.AttachDB(id, dbid)
-			if title != "" || dur > 0 || thumb != "" {
-				mgr.SetMeta(id, title, dur, thumb)
-				if storeUpdateMeta != nil {
-					_ = storeUpdateMeta(r.Context(), dbid, title, dur, thumb)
-				}
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "enqueued", "id": id, "db_id": dbid})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "enqueued", "id": id})
-	}))
 
-	mux.HandleFunc("/api/download", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		// Create minimal DB record (async pattern - no blocking on metadata)
+		var dbid int64
+		if storeCreate != nil {
+			// Fast insertion: store as pending with URL as title, no metadata fetching
+			if idv, err := storeCreate(r.Context(), req.URL, req.URL, 0, "", "pending", 0); err == nil {
+				dbid = idv
+
+				// Process download asynchronously (fetches metadata, then enqueues)
+				if manager, ok := mgr.(*download.Manager); ok && st != nil {
+					go func(dbID int64, url string) {
+						ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+						defer cancel()
+						if err := manager.ProcessPendingDownload(ctx, dbID, url, st); err != nil {
+							slog.Error("ProcessPendingDownload failed",
+								"event", "process_download_error",
+								"db_id", dbID,
+								"url", url,
+								"error", err)
+						}
+					}(dbid, req.URL)
+				}
+			} else {
+				logging.LogDBOperation("create_download", 0, err)
+			}
+		}
+
+		// Return success immediately (async-first)
+		if dbid > 0 {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "enqueued", "db_id": dbid})
+		} else {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "enqueued"})
+		}
+	})
+
+	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w)
 			return
@@ -149,12 +132,25 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				if idv, err := storeCreate(r.Context(), u, u, 0, "", "pending", 0); err == nil {
 					dbid = idv
 					dbIDs = append(dbIDs, dbid)
+
+					// Immediately process in background goroutine instead of waiting for DBWorker
+					if manager, ok := mgr.(*download.Manager); ok && st != nil {
+						go func(dbID int64, url string) {
+							ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+							defer cancel()
+							if err := manager.ProcessPendingDownload(ctx, dbID, url, st); err != nil {
+								slog.Error("ProcessPendingDownload failed",
+									"event", "process_download_error",
+									"db_id", dbID,
+									"url", url,
+									"error", err)
+							}
+						}(dbid, u)
+					}
 				} else {
-					log.Printf("db create error: %v", err)
+					logging.LogDBOperation("create_download", 0, err)
 				}
 			}
-			// Note: We intentionally don't call mgr.Enqueue here anymore
-			// The worker pool will pick up pending URLs from the database
 		}
 
 		if validURLCount == 0 {
@@ -173,9 +169,9 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			response["duplicates_skipped"] = duplicateCount
 		}
 		writeJSON(w, http.StatusOK, response)
-	}))
+	})
 
-	mux.HandleFunc("/api/status", with(rl, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
 			return
@@ -183,25 +179,25 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		id := r.URL.Query().Get("id")
 		items := mgr.Snapshot(id)
 		writeJSON(w, http.StatusOK, map[string]any{"status": "success", "downloads": items})
-	}))
+	})
 
 	// Optional DB-backed listing; only registered if store is provided via main.
 	if st != nil {
-		mux.HandleFunc("/api/retry_failed", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("/api/retry_failed", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				methodNotAllowed(w)
 				return
 			}
 			affected, err := st.RetryFailedDownloads(r.Context())
 			if err != nil {
-				log.Printf("retry failed downloads: %v", err)
+				logging.LogRetryFailed(0, err)
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "retried", "count": affected})
-		}))
+		})
 
-		mux.HandleFunc("/api/remove", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("/api/remove", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodDelete {
 				methodNotAllowed(w)
 				return
@@ -214,14 +210,14 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				return
 			}
 			if err := st.DeleteDownload(r.Context(), req.ID); err != nil {
-				log.Printf("delete download id=%d: %v", req.ID, err)
+				logging.LogDBOperation("delete_download", req.ID, err)
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "deleted"})
-		}))
+		})
 
-		mux.HandleFunc("/api/download_file", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("/api/download_file", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
 				methodNotAllowed(w)
 				return
@@ -263,7 +259,10 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "file_not_found"})
 				return
 			} else if err != nil {
-				log.Printf("stat file %s: %v", fullPath, err)
+				slog.Error("failed to stat file",
+					"event", "file_stat_error",
+					"path", fullPath,
+					"error", err)
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
 				return
 			}
@@ -271,9 +270,9 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			// Serve the file
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 			http.ServeFile(w, r, fullPath)
-		}))
+		})
 
-		mux.HandleFunc("/api/downloads", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("/api/downloads", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
 				methodNotAllowed(w)
 				return
@@ -291,23 +290,30 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			}
 			items, err := st.ListDownloads(r.Context(), f)
 			if err != nil {
-				log.Printf("list downloads: %v", err)
+				slog.Error("failed to list downloads",
+					"event", "list_downloads_error",
+					"error", err)
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
 				return
 			}
 
-			// Log the JSON response for debugging
+			// Log the JSON response for debugging (only in debug level)
 			response := map[string]any{"status": "success", "downloads": items}
-			if jsonBytes, err := json.Marshal(response); err == nil {
-				log.Printf("/api/downloads response: %s", string(jsonBytes))
+			if slog.Default().Enabled(r.Context(), slog.LevelDebug) {
+				if jsonBytes, err := json.Marshal(response); err == nil {
+					slog.Debug("/api/downloads response",
+						"event", "api_response",
+						"endpoint", "/api/downloads",
+						"data", string(jsonBytes))
+				}
 			}
 
 			writeJSON(w, http.StatusOK, response)
-		}))
+		})
 	}
 
 	// Dashboard (HTML via Templ + HTMX)
-	mux.HandleFunc("/", with(rl, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" && r.URL.Path != "/dashboard" {
 			// Let other handlers handle or 404; fallthrough by returning
 			w.WriteHeader(http.StatusNotFound)
@@ -321,9 +327,9 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		items := mgr.Snapshot("")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = ui.Dashboard(items).Render(context.Background(), w)
-	}))
+	})
 
-	mux.HandleFunc("/dashboard", with(rl, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
 			return
@@ -331,19 +337,9 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		items := mgr.Snapshot("")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = ui.Dashboard(items).Render(context.Background(), w)
-	}))
+	})
 
-	mux.HandleFunc("/dashboard-lcars", with(rl, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w)
-			return
-		}
-		items := mgr.Snapshot("")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = ui.DashboardLCARS(items).Render(context.Background(), w)
-	}))
-
-	mux.HandleFunc("/dashboard/rows", with(rl, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/dashboard/rows", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
 			return
@@ -360,7 +356,10 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			f := store.ListFilter{Status: status, Sort: sortBy, Order: order}
 			rows, err := st.ListDownloads(r.Context(), f)
 			if err != nil {
-				log.Printf("list downloads: %v", err)
+				slog.Error("failed to list downloads for dashboard",
+					"event", "list_downloads_error",
+					"endpoint", "/dashboard/rows",
+					"error", err)
 				rows = nil
 			}
 			items = make([]*download.Item, 0, len(rows))
@@ -435,103 +434,9 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = ui.QueueTable(items).Render(context.Background(), w)
-	}))
+	})
 
-	mux.HandleFunc("/dashboard-lcars/rows", with(rl, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w)
-			return
-		}
-		// Optional filter/sort controls
-		q := r.URL.Query()
-		status := strings.ToLower(strings.TrimSpace(q.Get("status")))
-		sortBy := strings.ToLower(strings.TrimSpace(q.Get("sort")))
-		order := strings.ToLower(strings.TrimSpace(q.Get("order")))
-
-		var items []*download.Item
-		if st != nil {
-			// Prefer persisted listing when DB is enabled
-			f := store.ListFilter{Status: status, Sort: sortBy, Order: order}
-			rows, err := st.ListDownloads(r.Context(), f)
-			if err != nil {
-				log.Printf("list downloads: %v", err)
-				rows = nil
-			}
-			items = make([]*download.Item, 0, len(rows))
-			for i := range rows {
-				d := rows[i]
-				// Map DB status to in-memory state
-				var stt download.State
-				switch strings.ToLower(d.Status) {
-				case "downloading":
-					stt = download.StateDownloading
-				case "completed":
-					stt = download.StateCompleted
-				case "error":
-					stt = download.StateFailed
-				default:
-					stt = download.StateQueued
-				}
-				items = append(items, &download.Item{
-					ID:           fmt.Sprintf("%d", d.ID),
-					URL:          d.URL,
-					Title:        d.Title,
-					Duration:     d.Duration,
-					ThumbnailURL: d.ThumbnailURL,
-					Progress:     d.Progress,
-					State:        stt,
-					Filename:     d.Filename,
-				})
-			}
-		} else {
-			// Fallback: in-memory snapshot with basic filter/sort
-			items = mgr.Snapshot("")
-			if status != "" {
-				filtered := make([]*download.Item, 0, len(items))
-				for _, it := range items {
-					if string(it.State) == status {
-						filtered = append(filtered, it)
-					}
-				}
-				items = filtered
-			}
-			if sortBy != "" {
-				less := func(i, j int) bool { return false }
-				switch sortBy {
-				case "title":
-					less = func(i, j int) bool {
-						ai := items[i].Title
-						if ai == "" {
-							ai = items[i].URL
-						}
-						aj := items[j].Title
-						if aj == "" {
-							aj = items[j].URL
-						}
-						return strings.ToLower(ai) < strings.ToLower(aj)
-					}
-				case "status":
-					less = func(i, j int) bool { return items[i].State < items[j].State }
-				case "progress":
-					less = func(i, j int) bool { return items[i].Progress < items[j].Progress }
-				case "date":
-					// No exported timestamps on snapshot items; ignore
-					less = nil
-				}
-				if less != nil {
-					if order == "desc" {
-						sort.Slice(items, func(i, j int) bool { return less(j, i) })
-					} else {
-						sort.Slice(items, less)
-					}
-				}
-			}
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = ui.QueueTableLCARS(items).Render(context.Background(), w)
-	}))
-
-	mux.HandleFunc("/dashboard/enqueue", with(rl, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/dashboard/enqueue", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w)
 			return
@@ -550,49 +455,40 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			return
 		}
 
-		// Enqueue immediately without metadata fetching to make it async
-		id, err := mgr.Enqueue(u)
-		if err != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			switch err.Error() {
-			case "queue_full":
-				w.WriteHeader(http.StatusTooManyRequests)
-				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Queue is full, try again later</div>`))
-			case "shutting_down":
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Service is shutting down</div>`))
-			default:
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Internal error</div>`))
+		// Check for duplicates first (before any DB write)
+		if st != nil {
+			if completed, err := st.IsURLCompleted(r.Context(), u); err == nil && completed {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusOK)
+				response := `<div class="text-blue-600 text-sm">✓ Video already downloaded <script>
+					setTimeout(() => document.getElementById('enqueue-status').innerHTML = '', 3000);
+					htmx.trigger('#queue', 'refresh');
+				</script></div>`
+				_, _ = w.Write([]byte(response))
+				return
 			}
-			return
 		}
 
-		// Create minimal DB record and fetch metadata asynchronously
+		// Create minimal DB record (async pattern - no blocking on metadata)
 		if storeCreate != nil {
-			go func() {
-				var dbid int64
-				var title string
-				var dur int64
-				var thumb string
-
-				// Create initial DB record with URL as title
-				if idv, err := storeCreate(context.Background(), u, u, 0, "", "pending", 0); err == nil {
-					dbid = idv
-					mgr.AttachDB(id, dbid)
-
-					// Fetch metadata asynchronously
-					if mi, err := download.FetchMediaInfo(u); err == nil {
-						title, dur, thumb = mi.Title, mi.DurationSec, mi.ThumbnailURL
-						mgr.SetMeta(id, title, dur, thumb)
-						if storeUpdateMeta != nil {
-							_ = storeUpdateMeta(context.Background(), dbid, title, dur, thumb)
+			// Fast insertion: store as pending with URL as title, no metadata fetching
+			if dbid, err := storeCreate(r.Context(), u, u, 0, "", "pending", 0); err == nil {
+				// Process download asynchronously (fetches metadata, then enqueues)
+				if manager, ok := mgr.(*download.Manager); ok && st != nil {
+					go func(dbID int64, url string) {
+						ctx := context.Background()
+						if err := manager.ProcessPendingDownload(ctx, dbID, url, st); err != nil {
+							slog.Error("ProcessPendingDownload failed",
+								"event", "process_download_error",
+								"db_id", dbID,
+								"url", url,
+								"error", err)
 						}
-					}
-				} else {
-					log.Printf("db create error: %v", err)
+					}(dbid, u)
 				}
-			}()
+			} else {
+				logging.LogDBOperation("create_download", 0, err)
+			}
 		}
 
 		// Return immediate success response with auto-clear and trigger queue refresh
@@ -606,92 +502,11 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		</script></div>`
 
 		_, _ = w.Write([]byte(response))
-	}))
-
-	mux.HandleFunc("/dashboard-lcars/enqueue", with(rl, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w)
-			return
-		}
-		if err := r.ParseForm(); err != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Invalid form data</div>`))
-			return
-		}
-		u := strings.TrimSpace(r.Form.Get("url"))
-		if !validURL(u) {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Invalid URL</div>`))
-			return
-		}
-
-		// Enqueue immediately without metadata fetching to make it async
-		id, err := mgr.Enqueue(u)
-		if err != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			switch err.Error() {
-			case "queue_full":
-				w.WriteHeader(http.StatusTooManyRequests)
-				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Queue is full, try again later</div>`))
-			case "shutting_down":
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Service is shutting down</div>`))
-			default:
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Internal error</div>`))
-			}
-			return
-		}
-
-		// Create minimal DB record and fetch metadata asynchronously
-		if storeCreate != nil {
-			go func() {
-				var dbid int64
-				var title string
-				var dur int64
-				var thumb string
-
-				// Create initial DB record with URL as title
-				if idv, err := storeCreate(context.Background(), u, u, 0, "", "pending", 0); err == nil {
-					dbid = idv
-					mgr.AttachDB(id, dbid)
-
-					// Fetch metadata asynchronously
-					if mi, err := download.FetchMediaInfo(u); err == nil {
-						title, dur, thumb = mi.Title, mi.DurationSec, mi.ThumbnailURL
-						mgr.SetMeta(id, title, dur, thumb)
-						if storeUpdateMeta != nil {
-							_ = storeUpdateMeta(context.Background(), dbid, title, dur, thumb)
-						}
-					}
-				} else {
-					log.Printf("db create error: %v", err)
-				}
-			}()
-		}
-
-		// Return immediate success response with auto-clear and trigger queue refresh
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-
-		// Generate response with success message and script to refresh queue
-		response := `<div class="rounded bg-[#99cc99] text-black p-2">✓ Video queued successfully <script>
-            document.getElementById('enqueue-status').classList.remove('hidden');
-            setTimeout(() => {
-                document.getElementById('enqueue-status').innerHTML = '';
-                document.getElementById('enqueue-status').classList.add('hidden');
-            }, 3000);
-            htmx.trigger('#queue', 'refresh');
-        </script></div>`
-
-		_, _ = w.Write([]byte(response))
-	}))
+	})
 
 	// Dashboard remove endpoint
 	if st != nil {
-		mux.HandleFunc("/dashboard/remove", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("/dashboard/remove", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				methodNotAllowed(w)
 				return
@@ -712,7 +527,7 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			}
 
 			if err := st.DeleteDownload(r.Context(), id); err != nil {
-				log.Printf("delete download id=%d: %v", id, err)
+				logging.LogDBOperation("delete_download", id, err)
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Failed to remove item</div>`))
@@ -727,59 +542,17 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				htmx.trigger('#queue', 'refresh');
 			</script></div>`
 			_, _ = w.Write([]byte(response))
-		}))
-
-		mux.HandleFunc("/dashboard-lcars/remove", with(rl, func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				methodNotAllowed(w)
-				return
-			}
-			if err := r.ParseForm(); err != nil {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Invalid form data</div>`))
-				return
-			}
-			idStr := strings.TrimSpace(r.Form.Get("id"))
-			var id int64
-			if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id <= 0 {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Invalid ID</div>`))
-				return
-			}
-
-			if err := st.DeleteDownload(r.Context(), id); err != nil {
-				log.Printf("delete download id=%d: %v", id, err)
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Failed to remove item</div>`))
-				return
-			}
-
-			// Return success response and trigger queue refresh
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			response := `<div class="rounded bg-[#99cc99] text-black p-2">✓ Item removed <script>
-            document.getElementById('remove-status').classList.remove('hidden');
-            setTimeout(() => {
-                document.getElementById('remove-status').innerHTML = '';
-                document.getElementById('remove-status').classList.add('hidden');
-            }, 2000);
-            htmx.trigger('#queue', 'refresh');
-        </script></div>`
-			_, _ = w.Write([]byte(response))
-		}))
+		})
 
 		// Dashboard retry failed endpoint
-		mux.HandleFunc("/dashboard/retry_failed", with(rl, func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("/dashboard/retry_failed", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				methodNotAllowed(w)
 				return
 			}
 			affected, err := st.RetryFailedDownloads(r.Context())
 			if err != nil {
-				log.Printf("retry failed downloads: %v", err)
+				logging.LogRetryFailed(0, err)
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Failed to retry downloads</div>`))
@@ -793,35 +566,7 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				htmx.trigger('#queue', 'refresh');
 			</script></div>`, affected)
 			_, _ = w.Write([]byte(response))
-		}))
-
-		// Dashboard LCARS retry failed endpoint
-		mux.HandleFunc("/dashboard-lcars/retry_failed", with(rl, func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				methodNotAllowed(w)
-				return
-			}
-			affected, err := st.RetryFailedDownloads(r.Context())
-			if err != nil {
-				log.Printf("retry failed downloads: %v", err)
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`<div class="rounded bg-[#cc6677] text-white p-2">Failed to retry downloads</div>`))
-				return
-			}
-			// Return success response and trigger queue refresh
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			response := fmt.Sprintf(`<div class="rounded bg-[#99cc99] text-black p-2">✓ Retried %d failed downloads <script>
-				document.getElementById('retry-status').classList.remove('hidden');
-				setTimeout(() => {
-					document.getElementById('retry-status').innerHTML = '';
-					document.getElementById('retry-status').classList.add('hidden');
-				}, 3000);
-				htmx.trigger('#queue', 'refresh');
-			</script></div>`, affected)
-			_, _ = w.Write([]byte(response))
-		}))
+		})
 	}
 
 	// Static files
@@ -868,17 +613,6 @@ func validURL(u string) bool {
 
 // Middleware
 
-func with(rl rateLimiter, h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
-		if !rl.Allow(ip) {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{"status": "error", "message": "rate_limited"})
-			return
-		}
-		h(w, r)
-	}
-}
-
 func logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -887,7 +621,8 @@ func logger(next http.Handler) http.Handler {
 		if r.URL.Path == "/dashboard/rows" {
 			return
 		}
-		log.Printf("%s %s %s %s", r.RemoteAddr, r.Method, r.URL.Path, time.Since(start))
+		// TODO: capture response status code properly with a response writer wrapper
+		logging.LogHTTPRequest(r.Method, r.URL.Path, r.RemoteAddr, time.Since(start), 200)
 	})
 }
 
@@ -895,116 +630,14 @@ func recoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if v := recover(); v != nil {
-				log.Printf("panic: %v", v)
+				slog.Error("panic recovered",
+					"event", "panic_recovered",
+					"path", r.URL.Path,
+					"method", r.Method,
+					"panic", v)
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
 			}
 		}()
 		next.ServeHTTP(w, r)
 	})
-}
-
-func clientIP(r *http.Request) string {
-	// Respect common proxy headers, then fall back to RemoteAddr
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
-		}
-	}
-	if xr := r.Header.Get("X-Real-IP"); xr != "" {
-		return strings.TrimSpace(xr)
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
-}
-
-// Simple token bucket per IP with fixed refill interval and capacity.
-type ipRateLimiter struct {
-	cap           int
-	refill        time.Duration
-	buckets       map[string]*bucket
-	mu            sync.Mutex
-	cleanupTicker *time.Ticker
-	stopCleanup   chan struct{}
-}
-
-type bucket struct {
-	tokens int
-	last   time.Time
-}
-
-func newIPRateLimiter(cap int, refill time.Duration) *ipRateLimiter {
-	rl := &ipRateLimiter{
-		cap:           cap,
-		refill:        refill,
-		buckets:       make(map[string]*bucket),
-		cleanupTicker: time.NewTicker(time.Hour), // cleanup every hour
-		stopCleanup:   make(chan struct{}),
-	}
-	// Start cleanup goroutine
-	go rl.cleanupLoop()
-	return rl
-}
-
-// cleanupLoop removes stale buckets to prevent memory leaks
-func (rl *ipRateLimiter) cleanupLoop() {
-	for {
-		select {
-		case <-rl.cleanupTicker.C:
-			rl.cleanup()
-		case <-rl.stopCleanup:
-			rl.cleanupTicker.Stop()
-			return
-		}
-	}
-}
-
-// cleanup removes buckets that haven't been used for 24 hours
-func (rl *ipRateLimiter) cleanup() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	cutoff := time.Now().Add(-24 * time.Hour)
-	for ip, bucket := range rl.buckets {
-		if bucket.last.Before(cutoff) {
-			delete(rl.buckets, ip)
-		}
-	}
-}
-
-// Stop stops the cleanup goroutine
-func (rl *ipRateLimiter) Stop() {
-	select {
-	case <-rl.stopCleanup:
-		// Already stopped
-		return
-	default:
-		close(rl.stopCleanup)
-	}
-}
-
-func (rl *ipRateLimiter) Allow(key string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	now := time.Now()
-	b := rl.buckets[key]
-	if b == nil {
-		b = &bucket{tokens: rl.cap - 1, last: now}
-		rl.buckets[key] = b
-		return true
-	}
-	// refill if interval passed
-	if d := now.Sub(b.last); d >= rl.refill {
-		// reset once per interval
-		b.tokens = rl.cap
-		b.last = now
-	}
-	if b.tokens <= 0 {
-		return false
-	}
-	b.tokens--
-	return true
 }

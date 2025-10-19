@@ -1,23 +1,19 @@
 package download
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+	"videofetch/internal/logging"
 )
 
 type State string
@@ -29,12 +25,16 @@ const (
 	StateFailed      State = "failed"
 )
 
-// Buffer pool for progress parsing to reduce allocations
-var progressBufferPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 4096) // 4KB initial size
-		return &buf
-	},
+// progressData represents the JSON structure from yt-dlp's progress output
+type progressData struct {
+	Status             string  `json:"status"`
+	DownloadedBytes    float64 `json:"downloaded_bytes"`
+	TotalBytes         float64 `json:"total_bytes"`
+	TotalBytesEstimate float64 `json:"total_bytes_estimate,omitempty"`
+	Eta                float64 `json:"eta,omitempty"`
+	Speed              float64 `json:"speed,omitempty"`
+	FragmentIndex      int     `json:"fragment_index,omitempty"`
+	FragmentCount      int     `json:"fragment_count,omitempty"`
 }
 
 type Item struct {
@@ -65,19 +65,36 @@ type job struct {
 }
 
 type Manager struct {
-    outDir string
+	outDir string
 
-    jobs    chan job
-    wg      sync.WaitGroup
-    closing atomic.Bool
+	jobs    chan job
+	wg      sync.WaitGroup
+	closing atomic.Bool
 
-    // ensure Shutdown is safe to call multiple times
-    shutdownOnce sync.Once
+	// ensure Shutdown is safe to call multiple times
+	shutdownOnce sync.Once
 
-	mu        sync.RWMutex
-	downloads map[string]*Item
+	// Track background goroutines for progress and status updates
+	bgWg sync.WaitGroup
 
-	hooks Hooks
+	// Refactored components
+	registry   *ItemRegistry
+	downloader *Downloader
+
+	store Store
+}
+
+// Store interface defines methods for persisting download state
+type Store interface {
+	UpdateProgress(ctx context.Context, id int64, progress float64) error
+	UpdateStatus(ctx context.Context, id int64, status, errMsg string) error
+	UpdateFilename(ctx context.Context, id int64, filename string) error
+}
+
+// PendingDownloadStore defines methods needed to process pending downloads from the database
+type PendingDownloadStore interface {
+	UpdateStatus(ctx context.Context, id int64, status string, errMsg string) error
+	UpdateMeta(ctx context.Context, id int64, title string, duration int64, thumbnail string) error
 }
 
 func NewManager(outputDir string, workers, queueCap int) *Manager {
@@ -87,11 +104,19 @@ func NewManager(outputDir string, workers, queueCap int) *Manager {
 	if queueCap <= 0 {
 		queueCap = 64
 	}
+
 	m := &Manager{
-		outDir:    outputDir,
-		jobs:      make(chan job, queueCap),
-		downloads: make(map[string]*Item, queueCap*2),
+		outDir:     outputDir,
+		jobs:       make(chan job, queueCap),
+		registry:   NewItemRegistry(queueCap * 2),
+		downloader: NewDownloader(outputDir),
 	}
+
+	// Set up downloader callbacks
+	m.downloader.SetProgressCallback(m.updateProgress)
+	m.downloader.SetFilenameCallback(m.setFilename)
+
+	// Start workers
 	for i := 0; i < workers; i++ {
 		m.wg.Add(1)
 		go m.worker(i)
@@ -99,9 +124,22 @@ func NewManager(outputDir string, workers, queueCap int) *Manager {
 	return m
 }
 
-// SetHooks configures the hooks for progress and state updates
-func (m *Manager) SetHooks(hooks Hooks) {
-	m.hooks = hooks
+// SetStore configures the store for persisting progress and state updates
+func (m *Manager) SetStore(store Store) {
+	m.store = store
+}
+
+// SetRegistry allows replacing the registry (useful for testing)
+func (m *Manager) SetRegistry(registry *ItemRegistry) {
+	m.registry = registry
+}
+
+// SetDownloader allows replacing the downloader (useful for testing)
+func (m *Manager) SetDownloader(downloader *Downloader) {
+	m.downloader = downloader
+	// Re-setup callbacks
+	m.downloader.SetProgressCallback(m.updateProgress)
+	m.downloader.SetFilenameCallback(m.setFilename)
 }
 
 // StopAccepting stops queueing new jobs; Enqueue will return an error afterwards.
@@ -111,91 +149,71 @@ func (m *Manager) StopAccepting() {
 
 // Shutdown cancels workers after current job; safe to call multiple times.
 func (m *Manager) Shutdown() {
-    // Mark manager as closing to stop new enqueues
-    m.closing.Store(true)
-    // Close the jobs channel exactly once
-    m.shutdownOnce.Do(func() {
-        close(m.jobs)
-    })
-    // Wait for workers to finish current job
-    m.wg.Wait()
+	// Mark manager as closing to stop new enqueues
+	m.closing.Store(true)
+	// Close the jobs channel exactly once
+	m.shutdownOnce.Do(func() {
+		close(m.jobs)
+	})
+	// Wait for workers to finish current job
+	m.wg.Wait()
+	// Wait for background goroutines (progress and status updates) to complete
+	m.bgWg.Wait()
 }
 
 // Enqueue adds a new URL to the queue and returns the assigned ID.
 func (m *Manager) Enqueue(url string) (string, error) {
 	if m.closing.Load() {
-		return "", errors.New("shutting_down")
+		return "", ErrShuttingDown
 	}
+
 	id := genID()
-	it := &Item{ID: id, URL: url, Progress: 0, State: StateQueued, startedAt: time.Now(), updatedAt: time.Now()}
-	m.mu.Lock()
-	m.downloads[id] = it
-	m.mu.Unlock()
+
+	// Create the item in the registry
+	_, err := m.registry.Create(id, url)
+	if err != nil {
+		return "", fmt.Errorf("failed to create item: %w", err)
+	}
 
 	select {
 	case m.jobs <- job{id: id, url: url}:
 		return id, nil
 	default:
-		// queue full
-		// remove the entry we just added
-		m.mu.Lock()
-		delete(m.downloads, id)
-		m.mu.Unlock()
-		return "", errors.New("queue_full")
+		// queue full, remove the entry we just added
+		m.registry.Delete(id)
+		return "", ErrQueueFull
 	}
 }
 
 // AttachDB binds a database row ID to the in-memory item for persistence updates.
 func (m *Manager) AttachDB(id string, dbID int64) {
-	m.mu.Lock()
-	if it, ok := m.downloads[id]; ok {
-		it.DBID = dbID
+	if err := m.registry.Attach(id, dbID); err != nil {
+		// Log but don't fail - this is a best-effort operation
+		slog.Debug("failed to attach DB ID to item", "id", id, "db_id", dbID, "error", err)
 	}
-	m.mu.Unlock()
 }
 
 // SetMeta updates the in-memory item with extracted metadata for UI.
 func (m *Manager) SetMeta(id string, title string, duration int64, thumb string) {
-	m.mu.Lock()
-	if it, ok := m.downloads[id]; ok {
-		if title != "" {
-			it.Title = title
-		}
-		if duration > 0 {
-			it.Duration = duration
-		}
-		if thumb != "" {
-			it.ThumbnailURL = thumb
-		}
-		it.updatedAt = time.Now()
+	if err := m.registry.SetMeta(id, title, duration, thumb); err != nil {
+		// Log but don't fail - this is a best-effort operation
+		slog.Debug("failed to set metadata for item", "id", id, "error", err)
 	}
-	m.mu.Unlock()
 }
 
 // Snapshot returns a copy of the current download items. If id is non-empty, returns at most that item.
 func (m *Manager) Snapshot(id string) []*Item {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if id != "" {
-		if it, ok := m.downloads[id]; ok {
-			cp := *it
-			return []*Item{&cp}
-		}
-		return []*Item{}
-	}
-	out := make([]*Item, 0, len(m.downloads))
-	for _, it := range m.downloads {
-		cp := *it
-		out = append(out, &cp)
-	}
-	return out
+	return m.registry.Snapshot(id)
 }
 
 func (m *Manager) worker(idx int) {
 	defer m.wg.Done()
 	for j := range m.jobs {
 		m.updateState(j.id, StateDownloading, "")
-		if err := m.runYTDLP(j.id, j.url); err != nil {
+
+		// Use context for potential cancellation
+		ctx := context.Background()
+		if err := m.downloader.Download(ctx, j.id, j.url); err != nil {
 			m.updateFailure(j.id, err)
 		} else {
 			m.updateProgress(j.id, 100)
@@ -211,8 +229,8 @@ func CheckYTDLP() error {
 	if err != nil {
 		return err
 	}
-	// Ensure it supports --progress-template so our parser remains stable.
-	// If the flag is not supported, yt-dlp --help will not contain it.
+	// Ensure it supports --progress-template for JSON output.
+	// This is available in modern versions of yt-dlp.
 	out, err := exec.Command(p, "--help").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("yt-dlp not runnable: %w", err)
@@ -223,299 +241,106 @@ func CheckYTDLP() error {
 	return nil
 }
 
-// runYTDLP invokes yt-dlp and parses progress output to update the item.
-func (m *Manager) runYTDLP(id, url string) error {
-	// Defensive: ensure yt-dlp exists.
-	if err := CheckYTDLP(); err != nil {
-		return fmt.Errorf("yt_dlp_not_found: %w", err)
-	}
-
-	outTpl := filepath.Join(m.outDir, "%(title).200s-%(id)s.%(ext)s")
-
-	log.Printf("yt-dlp start id=%s url=%s output=%s", id, url, outTpl)
-
-	args := m.buildYTDLPArgs(url, outTpl)
-	cmd := exec.Command("yt-dlp", args...)
-
-	if err := m.executeWithProgressTracking(id, cmd); err != nil {
-		return err
-	}
-
-	log.Printf("yt-dlp success id=%s url=%s", id, url)
-	return nil
-}
-
-// buildYTDLPArgs constructs the argument list for yt-dlp based on Rust reference
-func (m *Manager) buildYTDLPArgs(url, outTpl string) []string {
-	return []string{
-		url,
-		"--progress-template", "download:remedia-%(progress.downloaded_bytes)s-%(progress.total_bytes)s-%(progress.total_bytes_estimate)s-%(progress.eta)s",
-		"--newline",
-		"--continue",
-		"--output", outTpl,
-		"--embed-thumbnail",
-		// "--embed-subs",
-		"--embed-metadata",
-		"--embed-chapters",
-		"--windows-filenames",
-	}
-}
-
-// executeWithProgressTracking runs the command and tracks progress
-func (m *Manager) executeWithProgressTracking(id string, cmd *exec.Cmd) error {
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("stderr: %w", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout: %w", err)
-	}
-
-	var stderrBuf, stdoutBuf bytes.Buffer
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start: %w", err)
-	}
-
-	// Read progress concurrently
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		m.parseProgress(id, bufio.NewScanner(io.TeeReader(stderr, &stderrBuf)))
-	}()
-	go func() {
-		defer wg.Done()
-		m.parseProgress(id, bufio.NewScanner(io.TeeReader(stdout, &stdoutBuf)))
-	}()
-	wg.Wait()
-
-	if err := cmd.Wait(); err != nil {
-		tail := tailString(stderrBuf.String(), 512)
-		if tail != "" {
-			return fmt.Errorf("yt-dlp: %w: %s", err, tail)
-		}
-		return fmt.Errorf("yt-dlp: %w", err)
-	}
-
-	// Extract filename from combined output (some yt-dlp messages go to stderr)
-	combined := strings.TrimSpace(stdoutBuf.String() + "\n" + stderrBuf.String())
-	if filename := m.extractFilename(combined); filename != "" {
-		m.setFilename(id, filename)
-	}
-
-	return nil
-}
-
-func (m *Manager) parseProgress(id string, sc *bufio.Scanner) {
-	// Use buffer pool to reduce allocations
-	bufPtr := progressBufferPool.Get().(*[]byte)
-	defer progressBufferPool.Put(bufPtr)
-
-	// Set a reasonable max buffer size (256KB)
-	sc.Buffer(*bufPtr, 256*1024)
-	// Split on either \n, \r\n, or bare \r since yt-dlp often rewrites
-	// progress on the same line using carriage returns.
-	sc.Split(scanCRorLF)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		// Only handle lines from our progress template. Rust example uses
-		// prefix "remedia-<downloaded>-<total>-<estimate>-<eta>".
-		if !strings.HasPrefix(line, "remedia-") {
-			continue
-		}
-		parts := strings.Split(line, "-")
-		if len(parts) < 5 {
-			continue
-		}
-		// parts[0] = "remedia"
-		downloaded := parseFloat64(parts[1])
-		total := parseFloat64(parts[2])
-		estimate := parseFloat64(parts[3])
-		// parts[4] is eta; unused for now
-		tBytes := total
-		if tBytes <= 0 && estimate > 0 {
-			tBytes = estimate
-		}
-		if tBytes > 0 && downloaded >= 0 {
-			p := downloaded / tBytes * 100.0
-			// Cap percentage to [0,100]; allow exact 100 when reported.
-			if p > 100 {
-				p = 100
-			} else if p < 0 {
-				p = 0
-			}
-			m.updateProgress(id, p)
-		}
-	}
-	if err := sc.Err(); err != nil {
-		log.Printf("progress scan error for %s: %v", id, err)
-	}
-}
-
-// parseFloat64 parses a simple decimal number, returning -1 on error.
-func parseFloat64(s string) float64 {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return -1
-	}
-	// Avoid introducing strconv allocations; manual parse is fine here.
-	var whole int64
-	var frac int64
-	var fracPow float64 = 1
-	neg := false
-	i := 0
-	if s[0] == '-' {
-		neg = true
-		i = 1
-	}
-	dotSeen := false
-	for ; i < len(s); i++ {
-		c := s[i]
-		if c == '.' && !dotSeen {
-			dotSeen = true
-			continue
-		}
-		if c < '0' || c > '9' {
-			return -1
-		}
-		d := int64(c - '0')
-		if !dotSeen {
-			whole = whole*10 + d
-		} else {
-			frac = frac*10 + d
-			fracPow *= 10
-		}
-	}
-	val := float64(whole)
-	if fracPow > 1 {
-		val += float64(frac) / fracPow
-	}
-	if neg {
-		val = -val
-	}
-	return val
-}
-
-// scanCRorLF is like bufio.ScanLines but treats a bare '\r' as a line
-// terminator as well. It also handles CRLF and strips a trailing CR.
-func scanCRorLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	// If at EOF and no data, return no token
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
-	}
-	// Search for newline or carriage return
-	for i := 0; i < len(data); i++ {
-		if data[i] == '\n' {
-			// Return the line without the trailing CR, if present
-			line := data[:i]
-			if i > 0 && data[i-1] == '\r' {
-				line = data[:i-1]
-			}
-			return i + 1, line, nil
-		}
-		if data[i] == '\r' {
-			// If CRLF, consume both; else just CR
-			if i+1 < len(data) && data[i+1] == '\n' {
-				return i + 2, data[:i], nil
-			}
-			return i + 1, data[:i], nil
-		}
-	}
-	// If at EOF, return the remaining data.
-	if atEOF {
-		// Drop a trailing CR, if any
-		if len(data) > 0 && data[len(data)-1] == '\r' {
-			return len(data), data[:len(data)-1], nil
-		}
-		return len(data), data, nil
-	}
-	// Request more data.
-	return 0, nil, nil
-}
-
-func parsePercent(s string) float64 {
-	// acceptable formats: "12", "12.3"
-	var whole, frac int
-	var n int
-	if i := strings.IndexByte(s, '.'); i >= 0 {
-		// fractional
-		wholeStr := s[:i]
-		fracStr := s[i+1:]
-		for _, r := range wholeStr {
-			if r < '0' || r > '9' {
-				return -1
-			}
-			whole = whole*10 + int(r-'0')
-		}
-		pow := 1.0
-		for _, r := range fracStr {
-			if r < '0' || r > '9' {
-				break
-			}
-			frac = frac*10 + int(r-'0')
-			pow *= 10
-		}
-		return float64(whole) + float64(frac)/pow
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			break
-		}
-		n = n*10 + int(r-'0')
-	}
-	return float64(n)
-}
-
 func (m *Manager) updateProgress(id string, p float64) {
-	m.mu.Lock()
-	if it, ok := m.downloads[id]; ok {
-		// only increase progress (yt-dlp prints for multiple phases)
-		if p > it.Progress {
-			prev := it.Progress
-			it.Progress = p
-			it.updatedAt = time.Now()
-			// Log when integer percentage advances to reduce noise
-			if int(p) != int(prev) {
-				log.Printf("yt-dlp progress id=%s url=%s progress=%d%%", id, it.URL, int(p))
+	prev, new, err := m.registry.SetProgress(id, p)
+	if err != nil {
+		// Item might have been removed
+		return
+	}
+
+	// Only process if progress actually changed
+	if new == prev {
+		return
+	}
+
+	// Log when integer percentage advances to reduce noise
+	if int(new) != int(prev) {
+		item := m.registry.Get(id)
+		if item != nil {
+			dbIDStr := ""
+			if item.DBID > 0 {
+				dbIDStr = fmt.Sprintf("%d", item.DBID)
 			}
-			if it.DBID > 0 && m.hooks != nil {
-				dbid := it.DBID
-				prog := it.Progress
+			logging.LogDownloadProgress(id, dbIDStr, new, item.URL)
+
+			// Update store if configured
+			if item.DBID > 0 && m.store != nil {
+				dbid := item.DBID
+				prog := new
+				m.bgWg.Add(1)
 				go func() {
+					defer m.bgWg.Done()
+					// Skip if shutting down
+					if m.closing.Load() {
+						return
+					}
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
-					m.callHookWithTimeout(ctx, func() { m.hooks.OnProgress(dbid, prog) })
+					if err := m.store.UpdateProgress(ctx, dbid, prog); err != nil {
+						// Ignore expected errors during shutdown
+						if !isExpectedShutdownError(err) {
+							slog.Error("failed to update progress in store",
+								"event", "store_update_error",
+								"operation", "update_progress",
+								"db_id", dbid,
+								"error", err)
+						}
+					}
 				}()
 			}
 		}
 	}
-	m.mu.Unlock()
 }
 
 func (m *Manager) updateState(id string, st State, errMsg string) {
-	m.mu.Lock()
-	if it, ok := m.downloads[id]; ok {
-		it.State = st
-		it.Error = errMsg
-		it.updatedAt = time.Now()
-		log.Printf("download state id=%s url=%s state=%s", id, it.URL, st)
-		if it.DBID > 0 && m.hooks != nil {
-			dbid := it.DBID
-			state := st
-			errStr := errMsg
+	if err := m.registry.SetState(id, st, errMsg); err != nil {
+		// Item might have been removed
+		return
+	}
+
+	item := m.registry.Get(id)
+	if item != nil {
+		logging.LogDownloadStateChange(id, item.URL, string(st))
+
+		if item.DBID > 0 && m.store != nil {
+			dbid := item.DBID
+			// Map State to status string
+			var statusStr string
+			switch st {
+			case StateQueued:
+				statusStr = "pending"
+			case StateDownloading:
+				statusStr = "downloading"
+			case StateCompleted:
+				statusStr = "completed"
+			case StateFailed:
+				statusStr = "error"
+			default:
+				statusStr = "pending"
+			}
+			m.bgWg.Add(1)
 			go func() {
+				defer m.bgWg.Done()
+				// Skip if shutting down
+				if m.closing.Load() {
+					return
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				m.callHookWithTimeout(ctx, func() { m.hooks.OnStateChange(dbid, state, errStr) })
+				if err := m.store.UpdateStatus(ctx, dbid, statusStr, errMsg); err != nil {
+					// Ignore expected errors during shutdown
+					if !isExpectedShutdownError(err) {
+						slog.Error("failed to update status in store",
+							"event", "store_update_error",
+							"operation", "update_status",
+							"db_id", dbid,
+							"status", statusStr,
+							"error", err)
+					}
+				}
 			}()
 		}
 	}
-	m.mu.Unlock()
 }
 
 func (m *Manager) updateFailure(id string, err error) {
@@ -525,92 +350,112 @@ func (m *Manager) updateFailure(id string, err error) {
 	m.updateState(id, StateFailed, msg)
 }
 
-// extractFilename extracts the downloaded filename from yt-dlp output
-func (m *Manager) extractFilename(output string) string {
-	lines := strings.Split(output, "\n")
-	var (
-		mergedName      string
-		alreadyDLName   string
-		lastDestination string
-	)
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// Prefer explicit final filename from merger stage
-		if strings.Contains(line, "Merging formats into") {
-			// Support both single and double quotes
-			// Example: [Merger] Merging formats into 'Title-id.mp4'
-			// or: [Merger] Merging formats into "Title-id.mp4"
-			start := strings.IndexAny(line, "'\"")
-			if start != -1 {
-				quote := line[start]
-				rest := line[start+1:]
-				if end := strings.IndexByte(rest, quote); end != -1 {
-					mergedName = filepath.Base(rest[:end])
-					continue
-				}
-			}
-		}
-		// If yt-dlp says file already exists, that includes the final filename
-		if strings.HasPrefix(line, "[download]") && strings.Contains(line, "has already been downloaded") {
-			// Format: [download] Title-id.mp4 has already been downloaded
-			// After prefix, take the segment before " has already"
-			// Fall back to fields if needed
-			if i := strings.Index(line, "] "); i != -1 {
-				rest := line[i+2:]
-				if j := strings.Index(rest, " has already been downloaded"); j != -1 {
-					alreadyDLName = filepath.Base(strings.TrimSpace(rest[:j]))
-					continue
-				}
-			}
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				alreadyDLName = filepath.Base(parts[1])
-				continue
-			}
-		}
-		// Record destination lines as a fallback (may be intermediate e.g., fXXX selections)
-		if strings.Contains(line, "Destination:") {
-			parts := strings.SplitN(line, "Destination:", 2)
-			if len(parts) == 2 {
-				path := strings.TrimSpace(parts[1])
-				lastDestination = filepath.Base(path)
-				continue
-			}
-		}
-	}
-	switch {
-	case mergedName != "":
-		return mergedName
-	case alreadyDLName != "":
-		return alreadyDLName
-	case lastDestination != "":
-		return lastDestination
-	default:
-		return ""
-	}
-}
-
 // setFilename updates the filename for an item and calls the hook
 func (m *Manager) setFilename(id, filename string) {
-	m.mu.Lock()
-	if it, ok := m.downloads[id]; ok {
-		it.Filename = filename
-		it.updatedAt = time.Now()
-		log.Printf("download filename id=%s filename=%s", id, filename)
-		if it.DBID > 0 && m.hooks != nil {
-			dbid := it.DBID
+	if err := m.registry.SetFilename(id, filename); err != nil {
+		// Item might have been removed
+		return
+	}
+
+	item := m.registry.Get(id)
+	if item != nil {
+		dbIDStr := ""
+		if item.DBID > 0 {
+			dbIDStr = fmt.Sprintf("%d", item.DBID)
+		}
+		logging.LogDownloadComplete(id, dbIDStr, filename)
+
+		if item.DBID > 0 && m.store != nil {
+			dbid := item.DBID
 			fname := filename
+			m.bgWg.Add(1)
 			go func() {
+				defer m.bgWg.Done()
+				// Skip if shutting down
+				if m.closing.Load() {
+					return
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				m.callHookWithTimeout(ctx, func() { m.hooks.OnFilename(dbid, fname) })
+				if err := m.store.UpdateFilename(ctx, dbid, fname); err != nil {
+					// Ignore expected errors during shutdown
+					if !isExpectedShutdownError(err) {
+						slog.Error("failed to update filename in store",
+							"event", "store_update_error",
+							"operation", "update_filename",
+							"db_id", dbid,
+							"filename", fname,
+							"error", err)
+					}
+				}
 			}()
 		}
 	}
-	m.mu.Unlock()
+}
+
+// ProcessPendingDownload processes a single pending download from the database
+// This replaces the DBWorker polling pattern by being called directly from HTTP handlers
+func (m *Manager) ProcessPendingDownload(ctx context.Context, dbID int64, url string, store PendingDownloadStore) error {
+	// Update status to downloading to prevent duplicate processing
+	if err := store.UpdateStatus(ctx, dbID, "downloading", ""); err != nil {
+		return fmt.Errorf("failed to update status for download %d: %w", dbID, err)
+	}
+
+	// Fetch media info
+	mediaInfo, err := FetchMediaInfo(url)
+	if err != nil {
+		logging.LogMetadataFetch(url, dbID, err)
+		// Update database with error
+		if updateErr := store.UpdateStatus(ctx, dbID, "failed", fmt.Sprintf("metadata_fetch_failed: %v", err)); updateErr != nil {
+			slog.Error("failed to update error status in ProcessPendingDownload",
+				"event", "store_update_error",
+				"operation", "update_status_on_metadata_failure",
+				"db_id", dbID,
+				"error", updateErr)
+		}
+		return fmt.Errorf("metadata fetch failed: %w", err)
+	}
+
+	// Update database with metadata
+	if err := store.UpdateMeta(ctx, dbID, mediaInfo.Title, mediaInfo.DurationSec, mediaInfo.ThumbnailURL); err != nil {
+		slog.Error("failed to update metadata in ProcessPendingDownload",
+			"event", "store_update_error",
+			"operation", "update_metadata",
+			"db_id", dbID,
+			"error", err)
+	} else {
+		logging.LogMetadataFetch(url, dbID, nil)
+	}
+
+	// Enqueue the download with the manager
+	id, err := m.Enqueue(url)
+	if err != nil {
+		slog.Error("failed to enqueue download in ProcessPendingDownload",
+			"event", "enqueue_error",
+			"db_id", dbID,
+			"url", url,
+			"error", err)
+		// Update database with error
+		if updateErr := store.UpdateStatus(ctx, dbID, "failed", fmt.Sprintf("enqueue_failed: %v", err)); updateErr != nil {
+			slog.Error("failed to update error status in ProcessPendingDownload",
+				"event", "store_update_error",
+				"operation", "update_status_on_enqueue_failure",
+				"db_id", dbID,
+				"error", updateErr)
+		}
+		return fmt.Errorf("enqueue failed: %w", err)
+	}
+
+	// Attach the database ID to the manager item for progress updates
+	m.AttachDB(id, dbID)
+	m.SetMeta(id, mediaInfo.Title, mediaInfo.DurationSec, mediaInfo.ThumbnailURL)
+
+	slog.Info("ProcessPendingDownload: download enqueued",
+		"event", "download_enqueued",
+		"url", url,
+		"db_id", dbID,
+		"manager_id", id)
+	return nil
 }
 
 func genID() string {
@@ -620,17 +465,6 @@ func genID() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
-}
-
-// tailString returns the last at most n bytes from s (by rune boundary best-effort).
-func tailString(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if len(s) <= n {
-		return strings.TrimSpace(s)
-	}
-	return strings.TrimSpace(s[len(s)-n:])
 }
 
 // truncateUTF8 truncates a string to at most n bytes while preserving UTF-8 validity
@@ -658,18 +492,15 @@ func truncateUTF8(s string, n int) string {
 	return ""
 }
 
-// callHookWithTimeout executes a hook function with context timeout protection
-func (m *Manager) callHookWithTimeout(ctx context.Context, fn func()) {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		fn()
-	}()
-	select {
-	case <-ctx.Done():
-		// Hook timed out, but we can't cancel it - just log and continue
-		log.Printf("hook call timed out")
-	case <-done:
-		// Hook completed successfully
+// isExpectedShutdownError checks if an error is expected during shutdown
+func isExpectedShutdownError(err error) bool {
+	if err == nil {
+		return false
 	}
+	// These are system-level errors from database/sql and context packages
+	// that don't expose typed errors, so string checking is necessary here
+	errStr := err.Error()
+	return errStr == "sql: database is closed" ||
+		errStr == "context deadline exceeded" ||
+		errStr == "context canceled"
 }

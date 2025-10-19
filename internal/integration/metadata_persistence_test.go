@@ -54,16 +54,13 @@ func TestVideoMetadataPersistence(t *testing.T) {
 		}
 		defer st.Close()
 
-		// Create hooks for database updates
-		hooks := &testStoreHooks{st: st}
-
-		// Create download manager with hooks
+		// Create download manager with store
 		mgr := download.NewManager(outputDir, 1, 4)
-		mgr.SetHooks(hooks)
+		mgr.SetStore(st)
 		defer mgr.Shutdown()
 
 		// Create server with database
-		handler := server.New(mgr, st)
+		handler := server.New(mgr, st, outputDir)
 		ts := httptest.NewServer(handler)
 		defer ts.Close()
 
@@ -163,7 +160,7 @@ func TestVideoMetadataPersistence(t *testing.T) {
 		defer mgr.Shutdown()
 
 		// Create new server instance
-		handler := server.New(mgr, st)
+		handler := server.New(mgr, st, outputDir)
 		ts := httptest.NewServer(handler)
 		defer ts.Close()
 

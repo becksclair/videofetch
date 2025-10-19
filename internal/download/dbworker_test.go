@@ -75,8 +75,11 @@ func (m *mockStore) UpdateMeta(ctx context.Context, id int64, title string, dura
 func TestRetryIncompleteDownloads_NoIncompleteDownloads(t *testing.T) {
 	store := &mockStore{}
 	mgr := NewManager("/tmp", 1, 10)
+	defer mgr.Shutdown()
 
 	dbWorker := NewDBWorker(store, mgr)
+	dbWorker.Start() // Start the worker before we can stop it
+	defer dbWorker.Stop()
 
 	err := dbWorker.RetryIncompleteDownloads()
 	if err != nil {
@@ -86,10 +89,6 @@ func TestRetryIncompleteDownloads_NoIncompleteDownloads(t *testing.T) {
 	if len(store.updateStatusCalls) != 0 {
 		t.Errorf("expected no status updates, got %d", len(store.updateStatusCalls))
 	}
-
-	// Clean up
-	dbWorker.Stop()
-	mgr.Shutdown()
 }
 
 func TestRetryIncompleteDownloads_WithIncompleteDownloads(t *testing.T) {
@@ -102,7 +101,11 @@ func TestRetryIncompleteDownloads_WithIncompleteDownloads(t *testing.T) {
 	}
 
 	mgr := NewManager("/tmp", 1, 10)
+	defer mgr.Shutdown()
+
 	dbWorker := NewDBWorker(store, mgr)
+	dbWorker.Start() // Start the worker before we can stop it
+	defer dbWorker.Stop()
 
 	err := dbWorker.RetryIncompleteDownloads()
 	if err != nil {
@@ -126,10 +129,6 @@ func TestRetryIncompleteDownloads_WithIncompleteDownloads(t *testing.T) {
 			t.Errorf("update %d: expected empty error message, got %s", i, call.errMsg)
 		}
 	}
-
-	// Clean up
-	dbWorker.Stop()
-	mgr.Shutdown()
 }
 
 func TestRetryIncompleteDownloads_ContextCancellation(t *testing.T) {
@@ -141,9 +140,11 @@ func TestRetryIncompleteDownloads_ContextCancellation(t *testing.T) {
 	}
 
 	mgr := NewManager("/tmp", 1, 10)
+	defer mgr.Shutdown()
+
 	dbWorker := NewDBWorker(store, mgr)
 
-	// Cancel the context immediately
+	// Cancel the context immediately (before starting)
 	dbWorker.cancel()
 
 	err := dbWorker.RetryIncompleteDownloads()
@@ -155,8 +156,4 @@ func TestRetryIncompleteDownloads_ContextCancellation(t *testing.T) {
 	if len(store.updateStatusCalls) != 0 {
 		t.Errorf("expected no status updates due to context cancellation, got %d", len(store.updateStatusCalls))
 	}
-
-	// Clean up
-	dbWorker.Stop()
-	mgr.Shutdown()
 }

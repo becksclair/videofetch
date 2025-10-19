@@ -4,71 +4,83 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"time"
 
+	"videofetch/internal/config"
 	"videofetch/internal/download"
+	"videofetch/internal/logging"
 	"videofetch/internal/server"
 	"videofetch/internal/store"
 )
 
 func main() {
-	var (
-		outputDir string
-		port      int
-		host      string
-		workers   int
-		queueCap  int
-		dbPath    string
-	)
+	// Create config with defaults
+	cfg := config.New()
 
-	flag.StringVar(&outputDir, "output-dir", "", "Directory for downloaded videos (default: $HOME/Videos/videofetch)")
-	flag.IntVar(&port, "port", 8080, "Server port")
-	flag.StringVar(&host, "host", "0.0.0.0", "Host address to bind")
-	flag.IntVar(&workers, "workers", 4, "Number of concurrent download workers")
-	flag.IntVar(&queueCap, "queue", 128, "Download queue capacity")
-	flag.StringVar(&dbPath, "db", "", "Path to SQLite database (default: OS cache dir: videofetch/videofetch.db)")
+	// Parse flags into config
+	flag.StringVar(&cfg.OutputDir, "output-dir", "", "Directory for downloaded videos (default: $HOME/Videos/videofetch)")
+	flag.IntVar(&cfg.Port, "port", cfg.Port, "Server port")
+	flag.StringVar(&cfg.Host, "host", cfg.Host, "Host address to bind")
+	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "Number of concurrent download workers")
+	flag.IntVar(&cfg.QueueCap, "queue", cfg.QueueCap, "Download queue capacity")
+	flag.StringVar(&cfg.DBPath, "db", "", "Path to SQLite database (default: OS cache dir: videofetch/videofetch.db)")
+	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: debug, info, warn, error")
 	flag.Parse()
 
-	absOut, err := computeOutputDir(outputDir)
-	if err != nil {
-		log.Fatalf("resolve output dir: %v", err)
-	}
-	if err := os.MkdirAll(absOut, 0o755); err != nil {
-		log.Fatalf("create output dir: %v", err)
+	// Validate configuration
+	if err := cfg.Validate(); err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
 	}
 
-	// Check yt-dlp presence early.
+	// Initialize structured logging with configured level
+	logging.Init(logging.ParseLevel(cfg.LogLevel))
+
+	// Resolve paths
+	if err := cfg.ResolveOutputDir(); err != nil {
+		slog.Error("failed to resolve output directory", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.ResolveDBPath(); err != nil {
+		slog.Error("failed to resolve database path", "error", err)
+		os.Exit(1)
+	}
+
+	// Create output directory
+	if err := os.MkdirAll(cfg.AbsOutputDir, 0o755); err != nil {
+		slog.Error("failed to create output directory", "path", cfg.AbsOutputDir, "error", err)
+		os.Exit(1)
+	}
+
+	// Check yt-dlp presence early
 	if err := download.CheckYTDLP(); err != nil {
-		log.Fatalf("yt-dlp not found: %v", err)
+		slog.Error("yt-dlp not found", "error", err)
+		os.Exit(1)
 	}
 
-	// Open database (optional): default to OS cache directory
-	if dbPath == "" {
-		dbPath = defaultCacheDBPath()
-	}
 	// Ensure DB directory exists
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
-		log.Fatalf("create db dir: %v", err)
+	if err := os.MkdirAll(filepath.Dir(cfg.AbsDBPath), 0o755); err != nil {
+		slog.Error("failed to create database directory", "path", filepath.Dir(cfg.AbsDBPath), "error", err)
+		os.Exit(1)
 	}
-	st, err := store.Open(dbPath)
+
+	// Open database
+	st, err := store.Open(cfg.AbsDBPath)
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		slog.Error("failed to open database", "path", cfg.AbsDBPath, "error", err)
+		os.Exit(1)
 	}
 	// Note: st.Close() is now called explicitly during shutdown
 
-	// Hooks to persist progress/state
-	hooks := &storeHooks{st: st}
-
-	mgr := download.NewManager(absOut, workers, queueCap)
-	mgr.SetHooks(hooks)
+	// Create download manager with config
+	mgr := download.NewManager(cfg.AbsOutputDir, cfg.Workers, cfg.QueueCap)
+	mgr.SetStore(st)
 	defer mgr.Shutdown()
 
 	// Start database worker to process pending URLs
@@ -76,17 +88,17 @@ func main() {
 
 	// Retry any incomplete downloads from previous sessions
 	if err := dbWorker.RetryIncompleteDownloads(); err != nil {
-		log.Printf("startup retry failed: %v", err)
+		slog.Warn("startup retry failed", "error", err)
 	}
 
 	dbWorker.Start()
 	defer dbWorker.Stop()
 
-	mux := server.New(mgr, st, absOut)
+	// Create HTTP server
+	mux := server.New(mgr, st, cfg.AbsOutputDir)
 
-	addr := fmt.Sprintf("%s:%d", host, port)
 	srv := &http.Server{
-		Addr:              addr,
+		Addr:              cfg.Addr,
 		Handler:           mux,
 		ReadTimeout:       15 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -96,9 +108,13 @@ func main() {
 
 	// Start server
 	go func() {
-		log.Printf("videofetch listening on http://%s (out=%s, workers=%d, queue=%d)", addr, absOut, workers, queueCap)
+		// Log server start with config summary
+		logging.LogServerStart(cfg.Addr, cfg.Summary())
+		slog.Debug("configuration details", "config", cfg.String())
+
 		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server error: %v", err)
+			slog.Error("server error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -106,7 +122,7 @@ func main() {
 	shutdownCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	<-shutdownCtx.Done()
-	log.Printf("shutdown signal received; draining...")
+	slog.Info("shutdown signal received", "event", "shutdown_start")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -114,108 +130,10 @@ func main() {
 	// Stop taking new jobs and cancel in-flight
 	mgr.StopAccepting()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("http shutdown: %v", err)
+		logging.LogServerShutdown("http shutdown error", err)
 	}
 	mgr.Shutdown()
 	// Close store after manager shutdown to avoid race conditions
 	st.Close()
-	log.Printf("shutdown complete")
-}
-
-// computeOutputDir returns the absolute output directory path.
-// If the provided flag value is empty, it defaults to "$HOME/Videos/videofetch".
-func computeOutputDir(flagVal string) (string, error) {
-	if flagVal == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(home, "Videos", "videofetch"), nil
-	}
-	return filepath.Abs(flagVal)
-}
-
-// storeHooks implements download.Hooks to persist updates.
-type storeHooks struct{ st *store.Store }
-
-func (h *storeHooks) OnProgress(dbID int64, progress float64) {
-	// Best-effort; log on failure but ignore database closure errors during shutdown.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := h.st.UpdateProgress(ctx, dbID, progress); err != nil {
-		// Ignore database closure errors during shutdown and context cancellation
-		if !h.isExpectedError(err) {
-			log.Printf("db update progress id=%d: %v", dbID, err)
-		}
-	}
-}
-
-// defaultCacheDBPath returns the cross-platform default path for the SQLite DB
-// as requested:
-// - Windows: %APPDATA%/videofetch/videofetch.db
-// - Linux/macOS: $HOME/.cache/videofetch/videofetch.db
-func defaultCacheDBPath() string {
-	if runtime.GOOS == "windows" {
-		if appdata := os.Getenv("APPDATA"); appdata != "" {
-			return filepath.Join(appdata, "videofetch", "videofetch.db")
-		}
-		// Fallback to user home if APPDATA is not set
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, "AppData", "Roaming", "videofetch", "videofetch.db")
-		}
-		// Last resort: current directory
-		return "videofetch.db"
-	}
-	// Linux/macOS default cache location
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cache", "videofetch", "videofetch.db")
-	}
-	// Fallback: place in working directory
-	return filepath.Join("videofetch", "videofetch.db")
-}
-
-func (h *storeHooks) OnStateChange(dbID int64, state download.State, errMsg string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	var st string
-	switch state {
-	case download.StateQueued:
-		st = "pending"
-	case download.StateDownloading:
-		st = "downloading"
-	case download.StateCompleted:
-		st = "completed"
-	case download.StateFailed:
-		st = "error"
-	default:
-		st = "pending"
-	}
-	if err := h.st.UpdateStatus(ctx, dbID, st, errMsg); err != nil {
-		// Ignore database closure errors during shutdown and context cancellation
-		if !h.isExpectedError(err) {
-			log.Printf("db update status id=%d: %v", dbID, err)
-		}
-	}
-}
-
-func (h *storeHooks) OnFilename(dbID int64, filename string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := h.st.UpdateFilename(ctx, dbID, filename); err != nil {
-		// Ignore database closure errors during shutdown and context cancellation
-		if !h.isExpectedError(err) {
-			log.Printf("db update filename id=%d: %v", dbID, err)
-		}
-	}
-}
-
-// isExpectedError checks if an error is expected during shutdown or context cancellation
-func (h *storeHooks) isExpectedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := err.Error()
-	return errStr == "sql: database is closed" ||
-		errStr == "context deadline exceeded" ||
-		errStr == "context canceled"
+	logging.LogServerShutdown("shutdown complete", nil)
 }

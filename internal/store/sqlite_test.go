@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -48,8 +49,8 @@ func TestCreateDownload_EmptyURL(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for empty URL")
 	}
-	if err.Error() != "empty_url" {
-		t.Errorf("Expected 'empty_url' error, got: %v", err)
+	if !errors.Is(err, ErrEmptyURL) {
+		t.Errorf("Expected ErrEmptyURL error, got: %v", err)
 	}
 }
 
@@ -348,8 +349,8 @@ func TestIsURLCompleted_EmptyURL(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for empty URL")
 	}
-	if err.Error() != "empty_url" {
-		t.Errorf("Expected 'empty_url' error, got: %v", err)
+	if !errors.Is(err, ErrEmptyURL) {
+		t.Errorf("Expected ErrEmptyURL error, got: %v", err)
 	}
 }
 

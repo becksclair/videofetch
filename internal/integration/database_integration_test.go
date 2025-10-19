@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"videofetch/internal/download"
 	"videofetch/internal/server"
@@ -45,16 +44,13 @@ func TestDatabasePersistence(t *testing.T) {
 		}
 		defer st.Close()
 
-		// Create hooks
-		hooks := &testStoreHooks{st: st}
-
-		// Create download manager with hooks
+		// Create download manager with store
 		mgr := download.NewManager(outputDir, 2, 8)
-		mgr.SetHooks(hooks)
+		mgr.SetStore(st)
 		defer mgr.Shutdown()
 
 		// Create server with database
-		handler := server.New(mgr, st)
+		handler := server.New(mgr, st, outputDir)
 		ts := httptest.NewServer(handler)
 		defer ts.Close()
 
@@ -122,7 +118,7 @@ func TestDatabasePersistence(t *testing.T) {
 		defer mgr.Shutdown()
 
 		// Create new server instance
-		handler := server.New(mgr, st)
+		handler := server.New(mgr, st, outputDir)
 		ts := httptest.NewServer(handler)
 		defer ts.Close()
 
@@ -186,7 +182,7 @@ func TestDatabasePersistence(t *testing.T) {
 		mgr := download.NewManager(outputDir, 2, 8)
 		defer mgr.Shutdown()
 
-		handler := server.New(mgr, st)
+		handler := server.New(mgr, st, outputDir)
 		ts := httptest.NewServer(handler)
 		defer ts.Close()
 
@@ -229,44 +225,4 @@ func TestDatabasePersistence(t *testing.T) {
 
 		t.Logf("Filtering works correctly")
 	})
-}
-
-// testStoreHooks implements download.Hooks for testing
-type testStoreHooks struct{ st *store.Store }
-
-func (h *testStoreHooks) OnProgress(dbID int64, progress float64) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := h.st.UpdateProgress(ctx, dbID, progress); err != nil {
-		// Ignore database closure errors during testing
-		if err.Error() != "sql: database is closed" {
-			// In tests, log but don't fail - this is best effort
-			_ = err
-		}
-	}
-}
-
-func (h *testStoreHooks) OnStateChange(dbID int64, state download.State, errMsg string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	var st string
-	switch state {
-	case download.StateQueued:
-		st = "pending"
-	case download.StateDownloading:
-		st = "downloading"
-	case download.StateCompleted:
-		st = "completed"
-	case download.StateFailed:
-		st = "error"
-	default:
-		st = "pending"
-	}
-	if err := h.st.UpdateStatus(ctx, dbID, st, errMsg); err != nil {
-		// Ignore database closure errors during testing
-		if err.Error() != "sql: database is closed" {
-			// In tests, log but don't fail - this is best effort
-			_ = err
-		}
-	}
 }

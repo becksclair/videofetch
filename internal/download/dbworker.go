@@ -3,7 +3,7 @@ package download
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 )
 
@@ -67,7 +67,9 @@ func (dw *DBWorker) run() {
 			return
 		case <-ticker.C:
 			if err := dw.processPendingURLs(); err != nil {
-				log.Printf("dbworker: error processing pending URLs: %v", err)
+				slog.Error("dbworker: error processing pending URLs",
+					"event", "dbworker_error",
+					"error", err)
 			}
 		}
 	}
@@ -89,23 +91,13 @@ func (dw *DBWorker) processPendingURLs() error {
 
 		downloadMap, ok := download.(map[string]interface{})
 		if !ok {
-			log.Printf("dbworker: invalid download type: %T", download)
+			slog.Error("dbworker: invalid download type",
+				"event", "dbworker_type_error",
+				"type", fmt.Sprintf("%T", download))
 			continue
 		}
 
-		downloadID, ok := downloadMap["id"].(int64)
-		if !ok {
-			log.Printf("dbworker: invalid download ID type")
-			continue
-		}
-
-		// Update status to downloading to prevent duplicate processing
-		if err := dw.store.UpdateStatus(dw.ctx, downloadID, "downloading", ""); err != nil {
-			log.Printf("dbworker: failed to update status for download %d: %v", downloadID, err)
-			continue
-		}
-
-		// Fetch metadata asynchronously
+		// Process metadata fetch and enqueue asynchronously
 		go dw.processDownload(downloadMap)
 	}
 
@@ -116,43 +108,26 @@ func (dw *DBWorker) processDownload(download map[string]interface{}) {
 	downloadID := download["id"].(int64)
 	downloadURL := download["url"].(string)
 
-	// Fetch media info
-	mediaInfo, err := FetchMediaInfo(downloadURL)
-	if err != nil {
-		log.Printf("dbworker: failed to fetch metadata for %s: %v", downloadURL, err)
-		// Update database with error
-		if updateErr := dw.store.UpdateStatus(dw.ctx, downloadID, "failed", fmt.Sprintf("metadata_fetch_failed: %v", err)); updateErr != nil {
-			log.Printf("dbworker: failed to update error status for download %d: %v", downloadID, updateErr)
+	// Use the new helper function from Manager
+	if err := dw.manager.ProcessPendingDownload(dw.ctx, downloadID, downloadURL, dw.store); err != nil {
+		slog.Error("dbworker: ProcessPendingDownload failed",
+			"event", "dbworker_process_error",
+			"db_id", downloadID,
+			"url", downloadURL,
+			"error", err)
+		// Mark as failed to prevent infinite retries
+		if updateErr := dw.store.UpdateStatus(dw.ctx, downloadID, "failed", fmt.Sprintf("ProcessPendingDownload failed: %v", err)); updateErr != nil {
+			slog.Error("dbworker: failed to update status after ProcessPendingDownload error",
+				"event", "dbworker_status_update_error",
+				"db_id", downloadID,
+				"error", updateErr)
 		}
-		return
 	}
-
-	// Update database with metadata
-	if err := dw.store.UpdateMeta(dw.ctx, downloadID, mediaInfo.Title, mediaInfo.DurationSec, mediaInfo.ThumbnailURL); err != nil {
-		log.Printf("dbworker: failed to update metadata for download %d: %v", downloadID, err)
-	}
-
-	// Enqueue the download with the manager
-	id, err := dw.manager.Enqueue(downloadURL)
-	if err != nil {
-		log.Printf("dbworker: failed to enqueue %s: %v", downloadURL, err)
-		// Update database with error
-		if updateErr := dw.store.UpdateStatus(dw.ctx, downloadID, "failed", fmt.Sprintf("enqueue_failed: %v", err)); updateErr != nil {
-			log.Printf("dbworker: failed to update error status for download %d: %v", downloadID, updateErr)
-		}
-		return
-	}
-
-	// Attach the database ID to the manager item for progress updates
-	dw.manager.AttachDB(id, downloadID)
-	dw.manager.SetMeta(id, mediaInfo.Title, mediaInfo.DurationSec, mediaInfo.ThumbnailURL)
-
-	log.Printf("dbworker: enqueued %s (db_id=%d, manager_id=%s)", downloadURL, downloadID, id)
 }
 
 // RetryIncompleteDownloads retries all downloads that are not completed at startup
 func (dw *DBWorker) RetryIncompleteDownloads() error {
-	log.Printf("dbworker: checking for incomplete downloads to retry...")
+	slog.Info("dbworker: checking for incomplete downloads to retry...")
 
 	incomplete, err := dw.store.GetIncompleteDownloads(dw.ctx, 100) // check up to 100 incomplete downloads
 	if err != nil {
@@ -160,11 +135,13 @@ func (dw *DBWorker) RetryIncompleteDownloads() error {
 	}
 
 	if len(incomplete) == 0 {
-		log.Printf("dbworker: no incomplete downloads found")
+		slog.Info("dbworker: no incomplete downloads found")
 		return nil
 	}
 
-	log.Printf("dbworker: found %d incomplete downloads, retrying...", len(incomplete))
+	slog.Info("dbworker: found incomplete downloads, retrying...",
+		"event", "dbworker_retry_start",
+		"count", len(incomplete))
 
 	for _, download := range incomplete {
 		select {
@@ -175,14 +152,23 @@ func (dw *DBWorker) RetryIncompleteDownloads() error {
 
 		// Reset status to pending so the regular worker can pick it up
 		if err := dw.store.UpdateStatus(dw.ctx, download.GetID(), "pending", ""); err != nil {
-			log.Printf("dbworker: failed to reset status for download %d: %v", download.GetID(), err)
+			slog.Error("dbworker: failed to reset status for download",
+				"event", "dbworker_reset_error",
+				"db_id", download.GetID(),
+				"error", err)
 			continue
 		}
 
-		log.Printf("dbworker: reset download %d (url=%s, status=%s, progress=%.1f) to pending for retry",
-			download.GetID(), download.GetURL(), download.GetStatus(), download.GetProgress())
+		slog.Info("dbworker: reset download to pending for retry",
+			"event", "dbworker_reset",
+			"db_id", download.GetID(),
+			"url", download.GetURL(),
+			"status", download.GetStatus(),
+			"progress", download.GetProgress())
 	}
 
-	log.Printf("dbworker: startup retry complete, reset %d downloads to pending", len(incomplete))
+	slog.Info("dbworker: startup retry complete",
+		"event", "dbworker_retry_complete",
+		"count", len(incomplete))
 	return nil
 }

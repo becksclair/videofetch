@@ -27,11 +27,13 @@ go build -o videofetch ./cmd/videofetch
 - `--db` (optional): SQLite database path; defaults to OS cache dir at `videofetch/videofetch.db`
   - Windows: `%APPDATA%/videofetch/videofetch.db`
   - Linux/macOS: `$HOME/.cache/videofetch/videofetch.db`
+- `--log-level` (default: `info`): Log level for structured JSON logging (`debug`, `info`, `warn`, `error`)
 
 Notes:
 
 - The database is always enabled; omitting `--db` uses the default path above.
 - Rate limiting: 60 requests/minute per client IP.
+- Logging outputs structured JSON to stdout, suitable for aggregation systems (ELK, CloudWatch, etc.)
 
 ## API
 
@@ -192,3 +194,24 @@ Health check endpoint; returns `ok`.
 - Downloaded files saved to `--output-dir` with original filenames
 - Database stored in OS cache directory by default
 - Static assets served from `./static/` directory
+
+### Structured Logging
+
+VideoFetch uses structured JSON logging for better observability and integration with log aggregation systems:
+
+- **Format**: JSON lines to stdout with ISO8601 timestamps
+- **Levels**: `DEBUG`, `INFO`, `WARN`, `ERROR` (set via `--log-level` flag)
+- **Event Types**: Each log entry includes an `event` field for filtering:
+  - `server_start`, `server_shutdown`: Server lifecycle events
+  - `http_request`: HTTP request logging with method, path, duration
+  - `download_*`: Download lifecycle (start, progress, complete, error)
+  - `db_*`: Database operations (create, update, delete)
+  - `metadata_*`: Metadata fetching operations
+  - `ytdlp_*`: yt-dlp command execution
+  - `dbworker_*`: Background worker operations
+
+Example log entries:
+```json
+{"time":"2025-10-19T08:00:00Z","level":"INFO","msg":"server started","event":"server_start","addr":"0.0.0.0:8080","workers":4}
+{"time":"2025-10-19T08:00:01Z","level":"INFO","msg":"download complete","event":"download_complete","download_id":"abc123","db_id":"42","filename":"video.mp4"}
+{"time":"2025-10-19T08:00:02Z","level":"DEBUG","msg":"download progress","event":"download_progress","download_id":"abc123","progress":75.5}

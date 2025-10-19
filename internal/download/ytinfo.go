@@ -3,7 +3,6 @@ package download
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 	"os/exec"
@@ -95,16 +94,16 @@ func FetchMediaInfo(inputURL string) (MediaInfo, error) {
 	if err := sc.Err(); err != nil {
 		return MediaInfo{}, err
 	}
-	return MediaInfo{}, errors.New("no_media_info")
+	return MediaInfo{}, ErrNoMediaInfo
 }
 
 // validateURL ensures the URL is safe to pass to external commands
 func validateURL(rawURL string) error {
 	if rawURL == "" {
-		return errors.New("empty URL")
+		return fmt.Errorf("empty URL")
 	}
 	if len(rawURL) > 2048 {
-		return errors.New("URL too long")
+		return fmt.Errorf("URL too long")
 	}
 	// Parse URL to validate structure
 	parsed, err := url.Parse(rawURL)
@@ -117,7 +116,7 @@ func validateURL(rawURL string) error {
 	}
 	// Ensure host is present
 	if parsed.Host == "" {
-		return errors.New("missing host")
+		return fmt.Errorf("missing host")
 	}
 	// Check for shell metacharacters that could be dangerous (but allow & in query params)
 	dangerous := []string{";", "|", "`", "$", "(", ")", "<", ">"}
@@ -128,7 +127,7 @@ func validateURL(rawURL string) error {
 	}
 	// Check for newlines/carriage returns separately since they're handled by URL parsing
 	if strings.ContainsAny(rawURL, "\n\r") {
-		return errors.New("URL contains line breaks")
+		return fmt.Errorf("URL contains line breaks")
 	}
 	return nil
 }

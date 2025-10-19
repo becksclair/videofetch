@@ -6,39 +6,53 @@ import (
 	"testing"
 )
 
-// Test that only remedia (download) lines affect the percentage, and
+// Test that only JSON download lines affect the percentage, and
 // that unrelated 100% lines (e.g., from [Merger] or other phases) are ignored.
-// If remedia reports full bytes downloaded, allow progress to reach 100.
+// If JSON reports full bytes downloaded, allow progress to reach 100.
 func TestParseProgress_IgnoresNonDownloadPhases(t *testing.T) {
-	m := &Manager{downloads: map[string]*Item{"x": {ID: "x", URL: "u", Progress: 0, State: StateDownloading}}}
+	// Create a registry and add an item
+	registry := NewItemRegistry(10)
+	registry.Create("x", "u")
 
-	// Simulate typical yt-dlp output with noisy lines and remedia progress lines.
+	// Create a downloader with a progress callback that updates the registry
+	downloader := NewDownloader(t.TempDir())
+	downloader.SetProgressCallback(func(id string, progress float64) {
+		registry.SetProgress(id, progress)
+	})
+
+	// Simulate typical yt-dlp output with noisy lines and JSON progress lines.
 	lines := []string{
 		"[youtube] abc123: Downloading webpage",
 		"some other noise",
-		"remedia-31000-100000-0-10",
+		`{"status": "downloading", "downloaded_bytes": 31000, "total_bytes": 100000}`,
 		"[Merger] Merging formats into \"file.mp4\" 100%", // should be ignored
-		"remedia-420000-1000000-0-5",
-		"[ffmpeg] Post-process file 100%", // should be ignored
-		"remedia-1000000-1000000-0-0",     // should not set to final 100 here
+		`{"status": "downloading", "downloaded_bytes": 420000, "total_bytes": 1000000}`,
+		"[ffmpeg] Post-process file 100%",                                                // should be ignored
+		`{"status": "downloading", "downloaded_bytes": 1000000, "total_bytes": 1000000}`, // should set to final 100 here
 	}
 	sc := bufio.NewScanner(strings.NewReader(strings.Join(lines, "\n")))
-	m.parseProgress("x", sc)
+	downloader.parseProgress("x", sc)
 
-	got := m.Snapshot("x")[0].Progress
+	got := registry.Get("x").Progress
 	if got != 100.0 {
 		t.Fatalf("expected progress 100.0, got %.1f", got)
 	}
 
 	// Re-run with only a non-[download] 100% line first to ensure it does not set to 100
-	m2 := &Manager{downloads: map[string]*Item{"y": {ID: "y", URL: "u", Progress: 0, State: StateDownloading}}}
+	registry2 := NewItemRegistry(10)
+	registry2.Create("y", "u")
+	downloader2 := NewDownloader(t.TempDir())
+	downloader2.SetProgressCallback(func(id string, progress float64) {
+		registry2.SetProgress(id, progress)
+	})
+
 	lines2 := []string{
 		"[Merger] Merging formats into \"file.mp4\" 100%", // should be ignored
-		"remedia-50000-1000000-0-0",
+		`{"status": "downloading", "downloaded_bytes": 50000, "total_bytes": 1000000}`,
 	}
 	sc2 := bufio.NewScanner(strings.NewReader(strings.Join(lines2, "\n")))
-	m2.parseProgress("y", sc2)
-	got2 := m2.Snapshot("y")[0].Progress
+	downloader2.parseProgress("y", sc2)
+	got2 := registry2.Get("y").Progress
 	if got2 != 5.0 {
 		t.Fatalf("expected progress 5.0, got %.1f", got2)
 	}
@@ -46,13 +60,70 @@ func TestParseProgress_IgnoresNonDownloadPhases(t *testing.T) {
 
 // Ensure carriage-return-delimited progress updates are handled (no newlines).
 func TestParseProgress_SplitsOnCarriageReturn(t *testing.T) {
-	m := &Manager{downloads: map[string]*Item{"z": {ID: "z", URL: "u", Progress: 0, State: StateDownloading}}}
-	// Simulate a stream where remedia lines are CR-delimited (as with non-newline progress)
-	stream := "remedia-100000-1000000-0-0\rremedia-250000-1000000-0-0\rremedia-500000-1000000-0-0\r"
+	registry := NewItemRegistry(10)
+	registry.Create("z", "u")
+
+	downloader := NewDownloader(t.TempDir())
+	downloader.SetProgressCallback(func(id string, progress float64) {
+		registry.SetProgress(id, progress)
+	})
+
+	// Simulate a stream where JSON lines are CR-delimited (as with non-newline progress)
+	stream := `{"status": "downloading", "downloaded_bytes": 100000, "total_bytes": 1000000}` + "\r" +
+		`{"status": "downloading", "downloaded_bytes": 250000, "total_bytes": 1000000}` + "\r" +
+		`{"status": "downloading", "downloaded_bytes": 500000, "total_bytes": 1000000}` + "\r"
 	sc := bufio.NewScanner(strings.NewReader(stream))
-	m.parseProgress("z", sc)
-	got := m.Snapshot("z")[0].Progress
+	downloader.parseProgress("z", sc)
+	got := registry.Get("z").Progress
 	if got != 50.0 {
 		t.Fatalf("expected 50.0, got %.1f", got)
+	}
+}
+
+// Test that total_bytes_estimate is used when total_bytes is not available
+func TestParseProgress_UsesEstimateWhenNoTotal(t *testing.T) {
+	registry := NewItemRegistry(10)
+	registry.Create("a", "u")
+
+	downloader := NewDownloader(t.TempDir())
+	downloader.SetProgressCallback(func(id string, progress float64) {
+		registry.SetProgress(id, progress)
+	})
+
+	// Simulate JSON with no total_bytes, only estimate
+	lines := []string{
+		`{"status": "downloading", "downloaded_bytes": 750000, "total_bytes": 0, "total_bytes_estimate": 1500000}`,
+	}
+	sc := bufio.NewScanner(strings.NewReader(strings.Join(lines, "\n")))
+	downloader.parseProgress("a", sc)
+
+	got := registry.Get("a").Progress
+	if got != 50.0 {
+		t.Fatalf("expected progress 50.0, got %.1f", got)
+	}
+}
+
+// Test that invalid JSON lines are gracefully skipped
+func TestParseProgress_SkipsInvalidJSON(t *testing.T) {
+	registry := NewItemRegistry(10)
+	registry.Create("b", "u")
+
+	downloader := NewDownloader(t.TempDir())
+	downloader.SetProgressCallback(func(id string, progress float64) {
+		registry.SetProgress(id, progress)
+	})
+
+	lines := []string{
+		`not valid json`,
+		`{"status": "downloading", "downloaded_bytes": 250000, "total_bytes": 500000}`,
+		`{broken json`,
+		`{"status": "downloading", "downloaded_bytes": 500000, "total_bytes": 500000}`,
+	}
+	sc := bufio.NewScanner(strings.NewReader(strings.Join(lines, "\n")))
+	downloader.parseProgress("b", sc)
+
+	got := registry.Get("b").Progress
+	if got != 100.0 {
+		t.Fatalf("expected progress 100.0, got %.1f", got)
 	}
 }
