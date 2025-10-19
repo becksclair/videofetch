@@ -79,13 +79,11 @@ func TestManagerQueueFull(t *testing.T) {
 	defer m.Shutdown()
 
 	// Fill the queue
-	ids := make([]string, 0, 3)
 	for i := 0; i < 2; i++ {
-		id, err := m.Enqueue("http://example.com/video")
+		_, err := m.Enqueue("http://example.com/video")
 		if err != nil {
 			t.Fatalf("failed to enqueue item %d: %v", i, err)
 		}
-		ids = append(ids, id)
 	}
 
 	// Try to add one more - should fail with queue full

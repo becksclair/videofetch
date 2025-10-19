@@ -9,7 +9,6 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"videofetch/internal/logging"
@@ -287,49 +286,6 @@ func scanCRorLF(data []byte, atEOF bool) (advance int, token []byte, err error) 
 	}
 	// Request more data.
 	return 0, nil, nil
-}
-
-// parseFloat64 parses a decimal number, returning -1 on error.
-func parseFloat64(s string) float64 {
-	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	if err != nil {
-		return -1
-	}
-	return f
-}
-
-// parsePercent parses a percentage value from a string
-func parsePercent(s string) float64 {
-	// acceptable formats: "12", "12.3"
-	var whole, frac int
-	var n int
-	if i := strings.IndexByte(s, '.'); i >= 0 {
-		// fractional
-		wholeStr := s[:i]
-		fracStr := s[i+1:]
-		for _, r := range wholeStr {
-			if r < '0' || r > '9' {
-				return -1
-			}
-			whole = whole*10 + int(r-'0')
-		}
-		pow := 1.0
-		for _, r := range fracStr {
-			if r < '0' || r > '9' {
-				break
-			}
-			frac = frac*10 + int(r-'0')
-			pow *= 10
-		}
-		return float64(whole) + float64(frac)/pow
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			break
-		}
-		n = n*10 + int(r-'0')
-	}
-	return float64(n)
 }
 
 // tailString returns the last at most n bytes from s (by rune boundary best-effort).

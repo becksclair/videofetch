@@ -250,7 +250,6 @@ func TestProgress_NoEarlyHundred(t *testing.T) {
 		url = "https://www.youtube.com/watch?v=zGDzdps75ns"
 	}
 
-
 	outDir := t.TempDir()
 	mgr := download.NewManager(outDir, 1, 4)
 	t.Cleanup(func() { mgr.Shutdown() })

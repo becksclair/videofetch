@@ -373,11 +373,6 @@ func TestBatch_DuplicateFiltering(t *testing.T) {
 	// So we shouldn't expect immediate enqueue calls here
 }
 
-// errString adapts a string to error without fmt.Errorf noise
-type errString string
-
-func (e errString) Error() string { return string(e) }
-
 // setupTestServerStore creates an in-memory test store
 func setupTestServerStore(t *testing.T) *store.Store {
 	tempDir := t.TempDir()
