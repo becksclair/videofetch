@@ -299,3 +299,5 @@ static/style.css
 coverage.html
 
 downloads/
+static/.DS_Store
+.DS_Store

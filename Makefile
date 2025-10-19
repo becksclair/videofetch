@@ -5,8 +5,10 @@ CMD ?= ./cmd/videofetch
 HOST ?= 0.0.0.0
 PORT ?= 8080
 OUTPUT_DIR ?= $(HOME)/Videos/videofetch
+INSTALL_DIR ?= $(HOME)/.local/bin
+SERVICE_DIR ?= $(HOME)/.config/systemd/user
 
-.PHONY: build test run generate tools
+.PHONY: build test run generate tools install uninstall
 
 build: generate
 	go build -o $(BIN) $(CMD)
@@ -29,3 +31,23 @@ generate:
 # Install codegen tools
 tools:
 	go install github.com/a-h/templ/cmd/templ@latest
+
+# Install binary and systemd service
+install: build
+	@mkdir -p $(INSTALL_DIR)
+	@mkdir -p $(SERVICE_DIR)
+	cp $(BIN) $(INSTALL_DIR)/
+	cp videofetch.service $(SERVICE_DIR)/
+	systemctl --user daemon-reload
+	@echo "Installation complete. To start the service:"
+	@echo "  systemctl --user enable videofetch.service"
+	@echo "  systemctl --user start videofetch.service"
+
+# Uninstall binary and systemd service
+uninstall:
+	systemctl --user stop videofetch.service 2>/dev/null || true
+	systemctl --user disable videofetch.service 2>/dev/null || true
+	rm -f $(INSTALL_DIR)/$(BIN)
+	rm -f $(SERVICE_DIR)/videofetch.service
+	systemctl --user daemon-reload
+	@echo "Uninstallation complete."

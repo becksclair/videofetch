@@ -1,0 +1,25 @@
+[Unit]
+Description=VideoFetch Service
+Documentation=https://github.com/becksclair/videofetch
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/videofetch --host 127.0.0.1 --port 8080 --output-dir %h/Videos/videofetch
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=%h/Videos/videofetch %h/.cache/videofetch
+
+# Environment
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

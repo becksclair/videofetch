@@ -65,11 +65,14 @@ type job struct {
 }
 
 type Manager struct {
-	outDir string
+    outDir string
 
-	jobs    chan job
-	wg      sync.WaitGroup
-	closing atomic.Bool
+    jobs    chan job
+    wg      sync.WaitGroup
+    closing atomic.Bool
+
+    // ensure Shutdown is safe to call multiple times
+    shutdownOnce sync.Once
 
 	mu        sync.RWMutex
 	downloads map[string]*Item
@@ -108,11 +111,14 @@ func (m *Manager) StopAccepting() {
 
 // Shutdown cancels workers after current job; safe to call multiple times.
 func (m *Manager) Shutdown() {
-	if m.closing.Swap(true) {
-		// was already true
-	}
-	close(m.jobs)
-	m.wg.Wait()
+    // Mark manager as closing to stop new enqueues
+    m.closing.Store(true)
+    // Close the jobs channel exactly once
+    m.shutdownOnce.Do(func() {
+        close(m.jobs)
+    })
+    // Wait for workers to finish current job
+    m.wg.Wait()
 }
 
 // Enqueue adds a new URL to the queue and returns the assigned ID.
