@@ -190,13 +190,14 @@ templ QueueRows(items []*download.Item) {
 			</td>
 			<td class="p-2 border-b border-gray-200 align-middle"><a href={ it.URL } target="_blank" rel="noreferrer" class="text-blue-600 hover:text-blue-800">{ it.URL }</a></td>
 			<td class="p-2 border-b border-gray-200 align-middle">
-				if it.State == download.StateQueued {
+				switch it.State {
+				case download.StateQueued:
 					<span class="badge queued">queued</span>
-				} else if it.State == download.StateDownloading {
+				case download.StateDownloading:
 					<span class="badge downloading">downloading</span>
-				} else if it.State == download.StateCompleted {
+				case download.StateCompleted:
 					<span class="badge completed">completed</span>
-				} else if it.State == download.StateFailed {
+				case download.StateFailed:
 					<span class="badge failed">failed</span>
 				}
 			</td>
@@ -494,15 +495,16 @@ templ QueueRowLCARS(it *download.Item) {
 			<!-- Status and Actions -->
 			<div class="flex flex-col gap-[6px] min-w-[90px] items-stretch">
 				<!-- Status Badge -->
-				if it.State == download.StateQueued {
+				switch it.State {
+				case download.StateQueued:
 					<div class="px-2 py-2 bg-[#FFCC99] text-black text-[11px] font-bold text-center rounded border border-[#FFCC99]">QUEUED</div>
-				} else if it.State == download.StateDownloading {
+				case download.StateDownloading:
 					<div class="px-2 py-2 bg-[#99CCFF] text-black text-[11px] font-bold text-center rounded border border-[#99CCFF]">ACTIVE</div>
-				} else if it.State == download.StateCompleted {
+				case download.StateCompleted:
 					<div class="px-2 py-2 bg-[#99CC99] text-black text-[11px] font-bold text-center rounded border border-[#99CC99]">COMPLETE</div>
-				} else if it.State == download.StateFailed {
+				case download.StateFailed:
 					<div class="px-2 py-2 bg-[#cc6677] text-white text-[11px] font-bold text-center rounded border border-[#cc6677]">FAILED</div>
-				} else {
+				default:
 					<div class="px-2 py-2 bg-[#666666] text-[#999999] text-[11px] font-bold text-center rounded border border-[#666666]">UNKNOWN</div>
 				}
 				<!-- Actions -->
