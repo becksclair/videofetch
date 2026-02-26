@@ -17,6 +17,9 @@ type fakeMgr struct {
 func (f *fakeMgr) Enqueue(url string) (string, error)                            { return "id-1", nil }
 func (f *fakeMgr) AttachDB(id string, dbID int64)                                {}
 func (f *fakeMgr) SetMeta(id string, title string, duration int64, thumb string) {}
+func (f *fakeMgr) PauseByDBID(dbID int64) bool                                   { return false }
+func (f *fakeMgr) CancelByDBID(dbID int64) bool                                  { return false }
+func (f *fakeMgr) ResumeByDBID(dbID int64) (bool, error)                         { return false, nil }
 func (f *fakeMgr) Snapshot(id string) []*download.Item {
 	p := 0.0
 	if f.prog != nil {

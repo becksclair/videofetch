@@ -1,18 +1,25 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"videofetch/internal/download"
 	"videofetch/internal/logging"
@@ -25,11 +32,22 @@ type downloadManager interface {
 	Snapshot(id string) []*download.Item
 	AttachDB(id string, dbID int64)
 	SetMeta(id string, title string, duration int64, thumb string)
+	PauseByDBID(dbID int64) bool
+	CancelByDBID(dbID int64) bool
+	ResumeByDBID(dbID int64) (bool, error)
 }
 
 type Options struct {
 	UnsafeLogPayloads bool
 }
+
+var wsUpgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin:     isAllowedWebSocketOrigin,
+}
+
+const wsDiffCoalesceInterval = 200 * time.Millisecond
 
 // New returns an http.Handler with routes and middleware wired.
 // Minimal interface to abstract the store; nil store disables DB-backed features.
@@ -63,11 +81,15 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 			writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "invalid_url"})
 			return
 		}
-		// If store available, check for duplicates first
+		// If store available, check for duplicates first.
 		if st != nil {
-			if completed, err := st.IsURLCompleted(r.Context(), req.URL); err == nil && completed {
-				// URL already completed, silently return success without enqueueing
-				writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "already_completed"})
+			if existing, found, err := st.GetLatestDownloadByURL(r.Context(), req.URL); err == nil && found {
+				writeJSON(w, http.StatusOK, map[string]any{
+					"status":          "success",
+					"message":         "already_exists",
+					"existing_id":     existing.ID,
+					"existing_status": existing.Status,
+				})
 				return
 			}
 		}
@@ -81,6 +103,17 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 			} else {
 				logging.LogDBOperation("create_download", 0, err)
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+		} else {
+			if _, err := mgr.Enqueue(req.URL); err != nil {
+				msg := "internal_error"
+				if err == download.ErrQueueFull {
+					msg = "queue_full"
+				} else if err == download.ErrShuttingDown {
+					msg = "shutting_down"
+				}
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "error", "message": msg})
 				return
 			}
 		}
@@ -116,11 +149,11 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 			}
 			validURLCount++
 
-			// If store available, check for duplicates and skip completed URLs
+			// If store available, check for duplicates and skip existing URLs.
 			if st != nil {
-				if completed, err := st.IsURLCompleted(r.Context(), u); err == nil && completed {
+				if _, found, err := st.GetLatestDownloadByURL(r.Context(), u); err == nil && found {
 					duplicateCount++
-					continue // Skip already completed URLs silently
+					continue
 				}
 			}
 			var dbid int64
@@ -186,6 +219,47 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "deleted"})
 		})
 
+		mux.HandleFunc("/api/delete", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodDelete {
+				methodNotAllowed(w)
+				return
+			}
+			req, ok := parseControlRequest(w, r)
+			if !ok {
+				return
+			}
+
+			row, found, err := st.GetDownloadByID(r.Context(), req.ID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+				return
+			}
+			if row.Status != "completed" {
+				writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+				return
+			}
+
+			if err := removeTrackedFiles(outputDir, row.ArtifactPaths); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "delete_failed"})
+				return
+			}
+			if err := removeDownloadFile(outputDir, row.Filename); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "delete_failed"})
+				return
+			}
+
+			if err := st.DeleteDownload(r.Context(), req.ID); err != nil {
+				logging.LogDBOperation("delete_download", req.ID, err)
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "deleted", "id": req.ID})
+		})
+
 		mux.HandleFunc("/api/download_file", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
 				methodNotAllowed(w)
@@ -237,17 +311,7 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 				methodNotAllowed(w)
 				return
 			}
-			// Parse filters
-			q := r.URL.Query()
-			f := store.ListFilter{
-				Status: q.Get("status"),
-				Sort:   q.Get("sort"),
-				Order:  q.Get("order"),
-			}
-			if lim := q.Get("limit"); lim != "" {
-				// ignore conversion errors silently, relying on defaults
-				// kept minimal, as this is a server-side admin API
-			}
+			f := parseListFilter(r.URL.Query())
 			items, err := st.ListDownloads(r.Context(), f)
 			if err != nil {
 				slog.Error("failed to list downloads",
@@ -279,6 +343,418 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 			}
 
 			writeJSON(w, http.StatusOK, response)
+		})
+
+		mux.HandleFunc("/api/control/pause", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w)
+				return
+			}
+			req, ok := parseControlRequest(w, r)
+			if !ok {
+				return
+			}
+
+			row, found, err := st.GetDownloadByID(r.Context(), req.ID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+				return
+			}
+			switch row.Status {
+			case "paused":
+				writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "already_paused"})
+				return
+			case "completed", "canceled":
+				writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+				return
+			}
+
+			paused := mgr.PauseByDBID(req.ID)
+			if !paused {
+				pausedInDB, err := st.TryPause(r.Context(), req.ID)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+					return
+				}
+				updated, found, err := st.GetDownloadByID(r.Context(), req.ID)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+					return
+				}
+				if !found {
+					writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+					return
+				}
+				if pausedInDB {
+					writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "paused", "download": updated})
+					return
+				}
+				if updated.Status == "paused" {
+					writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "already_paused", "download": updated})
+					return
+				}
+				if updated.Status == "downloading" {
+					if !mgr.PauseByDBID(req.ID) {
+						writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+						return
+					}
+				} else {
+					writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+					return
+				}
+			}
+			pausedInDB, err := st.TryPauseUnlessTerminal(r.Context(), req.ID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			updated, found, err := st.GetDownloadByID(r.Context(), req.ID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+				return
+			}
+			if !pausedInDB && (updated.Status == "completed" || updated.Status == "canceled") {
+				writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "paused", "download": updated})
+		})
+
+		mux.HandleFunc("/api/control/resume", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w)
+				return
+			}
+			req, ok := parseControlRequest(w, r)
+			if !ok {
+				return
+			}
+			row, found, err := st.GetDownloadByID(r.Context(), req.ID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+				return
+			}
+			if row.Status == "downloading" || row.Status == "pending" {
+				writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "already_running"})
+				return
+			}
+			if row.Status != "paused" && row.Status != "canceled" && row.Status != "error" {
+				writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+				return
+			}
+
+			if resumed, err := mgr.ResumeByDBID(req.ID); err != nil {
+				msg := "internal_error"
+				if err == download.ErrQueueFull {
+					msg = "queue_full"
+				} else if err == download.ErrShuttingDown {
+					msg = "shutting_down"
+				}
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "error", "message": msg})
+				return
+			} else if resumed {
+				_, err := st.TryMarkResumed(r.Context(), req.ID)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+					return
+				}
+				updated, found, err := st.GetDownloadByID(r.Context(), req.ID)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+					return
+				}
+				if !found {
+					writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+					return
+				}
+				if updated.Status == "paused" || updated.Status == "canceled" {
+					writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "resumed", "download": updated})
+				return
+			}
+
+			// Fallback: persist back to pending and let DB worker process it.
+			if row.Status == "canceled" || row.Status == "error" {
+				if _, err := st.TryMarkResumed(r.Context(), req.ID); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+					return
+				}
+			}
+			if err := st.UpdateStatus(r.Context(), req.ID, "pending", ""); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			updated, found, err := st.GetDownloadByID(r.Context(), req.ID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "resumed", "download": updated})
+		})
+
+		mux.HandleFunc("/api/control/cancel", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w)
+				return
+			}
+			req, ok := parseControlRequest(w, r)
+			if !ok {
+				return
+			}
+			row, found, err := st.GetDownloadByID(r.Context(), req.ID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+				return
+			}
+			if row.Status == "completed" {
+				writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+				return
+			}
+			if row.Status == "canceled" {
+				writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "already_canceled"})
+				return
+			}
+
+			cancelRequested := mgr.CancelByDBID(req.ID)
+			if !cancelRequested {
+				updated, found, err := st.GetDownloadByID(r.Context(), req.ID)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+					return
+				}
+				if !found {
+					writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+					return
+				}
+				if updated.Status == "canceled" {
+					writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "already_canceled", "download": updated})
+					return
+				}
+				if updated.Status == "completed" {
+					writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+					return
+				}
+				if updated.Status == "downloading" {
+					cancelRequested = mgr.CancelByDBID(req.ID)
+					if !cancelRequested {
+						writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+						return
+					}
+				}
+			}
+
+			var canceled bool
+			if cancelRequested {
+				canceled, err = st.TryCancel(r.Context(), req.ID)
+			} else {
+				canceled, err = st.TryCancelNotDownloading(r.Context(), req.ID)
+			}
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			updated, found, err := st.GetDownloadByID(r.Context(), req.ID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+				return
+			}
+			if !canceled {
+				if updated.Status == "downloading" && !cancelRequested {
+					writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+					return
+				}
+				if updated.Status == "completed" {
+					writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+					return
+				}
+				if updated.Status == "canceled" {
+					writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "already_canceled", "download": updated})
+					return
+				}
+				writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+				return
+			}
+			if updated.Status != "canceled" {
+				if updated.Status == "completed" {
+					writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+					return
+				}
+				writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+				return
+			}
+			if cancelRequested {
+				stableRow, stable, err := waitForStableCanceled(r.Context(), st, req.ID, 250*time.Millisecond)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+					return
+				}
+				if !stable {
+					if stableRow.Status == "completed" {
+						writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+						return
+					}
+					writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+					return
+				}
+				updated = stableRow
+			}
+
+			// For active cancellations, worker shutdown/cleanup is asynchronous; avoid
+			// purging files here based on a timeout-window state sample.
+			if !cancelRequested {
+				_ = removeTrackedFiles(outputDir, updated.ArtifactPaths)
+				if updated.Filename != "" {
+					_ = removeDownloadFile(outputDir, updated.Filename)
+				}
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "canceled", "download": updated})
+		})
+
+		mux.HandleFunc("/api/control/play", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w)
+				return
+			}
+			req, ok := parseControlRequest(w, r)
+			if !ok {
+				return
+			}
+			row, found, err := st.GetDownloadByID(r.Context(), req.ID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+				return
+			}
+			if row.Status != "completed" || strings.TrimSpace(row.Filename) == "" {
+				writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "not_playable"})
+				return
+			}
+
+			fullPath := filepath.Join(outputDir, row.Filename)
+			if _, err := os.Stat(fullPath); err != nil {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "file_not_found"})
+				return
+			}
+			if err := openInDefaultPlayer(fullPath); err != nil {
+				slog.Error("failed to launch default player", "event", "player_launch_error", "id", req.ID, "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "player_launch_failed"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":   "success",
+				"message":  "play_started",
+				"download": row,
+			})
+		})
+
+		mux.HandleFunc("/api/ws/downloads", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				methodNotAllowed(w)
+				return
+			}
+			conn, err := wsUpgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			f := parseListFilter(r.URL.Query())
+			writeSnapshot := func() ([]store.Download, error) {
+				rows, err := st.ListDownloads(r.Context(), f)
+				if err != nil {
+					return nil, err
+				}
+				if err := conn.WriteJSON(map[string]any{
+					"type":      "snapshot",
+					"downloads": rows,
+					"at":        time.Now().UTC().Format(time.RFC3339Nano),
+				}); err != nil {
+					return nil, err
+				}
+				return rows, nil
+			}
+			changes, unsubscribe := st.SubscribeChanges(512)
+			defer unsubscribe()
+			prevRows, err := writeSnapshot()
+			if err != nil {
+				return
+			}
+
+			prevByID := mapDownloadsByID(prevRows)
+			coalesceTicker := time.NewTicker(wsDiffCoalesceInterval)
+			defer coalesceTicker.Stop()
+			heartbeatTicker := time.NewTicker(15 * time.Second)
+			defer heartbeatTicker.Stop()
+			pendingDiff := false
+			for {
+				select {
+				case <-r.Context().Done():
+					return
+				case _, ok := <-changes:
+					if !ok {
+						return
+					}
+					pendingDiff = true
+				case <-coalesceTicker.C:
+					if !pendingDiff {
+						continue
+					}
+					rows, err := st.ListDownloads(r.Context(), f)
+					if err != nil {
+						return
+					}
+					currentByID := mapDownloadsByID(rows)
+					diff := buildDownloadsDiff(prevByID, currentByID)
+					prevByID = currentByID
+					pendingDiff = false
+					if len(diff.Upserts) > 0 || len(diff.Deletes) > 0 {
+						if err := conn.WriteJSON(map[string]any{
+							"type":    "diff",
+							"upserts": diff.Upserts,
+							"deletes": diff.Deletes,
+							"at":      time.Now().UTC().Format(time.RFC3339Nano),
+						}); err != nil {
+							return
+						}
+					}
+				case <-heartbeatTicker.C:
+					if err := conn.WriteJSON(map[string]any{
+						"type": "heartbeat",
+						"at":   time.Now().UTC().Format(time.RFC3339Nano),
+					}); err != nil {
+						return
+					}
+				}
+			}
 		})
 	}
 
@@ -344,6 +820,10 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 					stt = download.StateCompleted
 				case "error":
 					stt = download.StateFailed
+				case "paused":
+					stt = download.StatePaused
+				case "canceled":
+					stt = download.StateCanceled
 				default:
 					stt = download.StateQueued
 				}
@@ -428,10 +908,10 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 
 		// Check for duplicates first (before any DB write)
 		if st != nil {
-			if completed, err := st.IsURLCompleted(r.Context(), u); err == nil && completed {
+			if _, found, err := st.GetLatestDownloadByURL(r.Context(), u); err == nil && found {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusOK)
-				response := `<div class="text-blue-600 text-sm">✓ Video already downloaded <script>
+				response := `<div class="text-blue-600 text-sm">✓ Video already exists <script>
 					setTimeout(() => document.getElementById('enqueue-status').innerHTML = '', 3000);
 					htmx.trigger('#queue', 'refresh');
 				</script></div>`
@@ -555,13 +1035,110 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+type controlRequest struct {
+	ID int64 `json:"id"`
+}
+
+func parseControlRequest(w http.ResponseWriter, r *http.Request) (controlRequest, bool) {
+	var req controlRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil || req.ID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "invalid_request"})
+		return controlRequest{}, false
+	}
+	return req, true
+}
+
+func parseListFilter(q url.Values) store.ListFilter {
+	f := store.ListFilter{
+		Status: q.Get("status"),
+		Sort:   q.Get("sort"),
+		Order:  q.Get("order"),
+	}
+	if lim := strings.TrimSpace(q.Get("limit")); lim != "" {
+		if n, err := strconv.Atoi(lim); err == nil && n > 0 {
+			f.Limit = n
+		}
+	}
+	if off := strings.TrimSpace(q.Get("offset")); off != "" {
+		if n, err := strconv.Atoi(off); err == nil && n >= 0 {
+			f.Offset = n
+		}
+	}
+	return f
+}
+
+type downloadsDiff struct {
+	Upserts []store.Download
+	Deletes []int64
+}
+
+func mapDownloadsByID(rows []store.Download) map[int64]store.Download {
+	out := make(map[int64]store.Download, len(rows))
+	for _, row := range rows {
+		out[row.ID] = row
+	}
+	return out
+}
+
+func buildDownloadsDiff(prev, current map[int64]store.Download) downloadsDiff {
+	diff := downloadsDiff{
+		Upserts: make([]store.Download, 0),
+		Deletes: make([]int64, 0),
+	}
+
+	for id, row := range current {
+		prevRow, ok := prev[id]
+		if !ok || !downloadsEqual(prevRow, row) {
+			diff.Upserts = append(diff.Upserts, row)
+		}
+	}
+	for id := range prev {
+		if _, ok := current[id]; !ok {
+			diff.Deletes = append(diff.Deletes, id)
+		}
+	}
+
+	sort.Slice(diff.Upserts, func(i, j int) bool {
+		return diff.Upserts[i].ID < diff.Upserts[j].ID
+	})
+	sort.Slice(diff.Deletes, func(i, j int) bool {
+		return diff.Deletes[i] < diff.Deletes[j]
+	})
+	return diff
+}
+
+func downloadsEqual(a, b store.Download) bool {
+	if a.ID != b.ID ||
+		a.URL != b.URL ||
+		a.Title != b.Title ||
+		a.Duration != b.Duration ||
+		a.ThumbnailURL != b.ThumbnailURL ||
+		a.Status != b.Status ||
+		a.Progress != b.Progress ||
+		a.Filename != b.Filename ||
+		a.ErrorMessage != b.ErrorMessage ||
+		!a.CreatedAt.Equal(b.CreatedAt) ||
+		!a.UpdatedAt.Equal(b.UpdatedAt) {
+		return false
+	}
+	if len(a.ArtifactPaths) != len(b.ArtifactPaths) {
+		return false
+	}
+	for i := range a.ArtifactPaths {
+		if a.ArtifactPaths[i] != b.ArtifactPaths[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func buildBatchResponse(validURLCount int, dbIDs []int64, duplicateCount int, createFailureCount int) (int, map[string]any) {
 	if validURLCount == 0 {
 		return http.StatusBadRequest, map[string]any{"status": "error", "message": "no_valid_urls"}
 	}
 
 	if len(dbIDs) == 0 && duplicateCount > 0 && createFailureCount == 0 {
-		return http.StatusOK, map[string]any{"status": "success", "message": "all_already_completed", "duplicates": duplicateCount}
+		return http.StatusOK, map[string]any{"status": "success", "message": "all_already_exists", "duplicates": duplicateCount}
 	}
 
 	if len(dbIDs) == 0 && createFailureCount > 0 {
@@ -604,6 +1181,142 @@ func validURL(u string) bool {
 	return true
 }
 
+func isAllowedWebSocketOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "chrome-extension":
+		return parsed.Host != ""
+	case "http", "https":
+		return strings.EqualFold(parsed.Host, r.Host)
+	default:
+		return false
+	}
+}
+
+func removeDownloadFile(outputDir, filename string) error {
+	if strings.TrimSpace(filename) == "" {
+		return nil
+	}
+	fullPath := filepath.Join(outputDir, filename)
+	if _, err := os.Stat(fullPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return os.Remove(fullPath)
+}
+
+func removeTrackedFiles(outputDir string, tracked []string) error {
+	if len(tracked) == 0 {
+		return nil
+	}
+
+	absOutputDir, err := filepath.Abs(outputDir)
+	if err != nil {
+		return err
+	}
+
+	seen := make(map[string]struct{}, len(tracked))
+	for _, path := range tracked {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			continue
+		}
+		full := trimmed
+		if !filepath.IsAbs(full) {
+			full = filepath.Join(outputDir, full)
+		}
+		full, err = filepath.Abs(full)
+		if err != nil {
+			continue
+		}
+		if !isPathWithin(absOutputDir, full) {
+			continue
+		}
+		seen[full] = struct{}{}
+	}
+
+	for file := range seen {
+		if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func isPathWithin(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
+func waitForStableCanceled(ctx context.Context, st *store.Store, id int64, window time.Duration) (store.Download, bool, error) {
+	deadline := time.Now().Add(window)
+	var last store.Download
+
+	for {
+		row, found, err := st.GetDownloadByID(ctx, id)
+		if err != nil {
+			return store.Download{}, false, err
+		}
+		if !found {
+			return store.Download{}, false, nil
+		}
+		last = row
+		if row.Status != "canceled" {
+			return row, false, nil
+		}
+		if time.Now().After(deadline) {
+			return row, true, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return last, false, ctx.Err()
+		case <-time.After(40 * time.Millisecond):
+		}
+	}
+}
+
+func openInDefaultPlayer(path string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", path)
+	case "darwin":
+		cmd = exec.Command("open", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			slog.Warn("default player exited with error", "event", "player_exit_error", "path", path, "error", err)
+		}
+	}()
+	return nil
+}
+
 // Middleware
 
 type responseRecorder struct {
@@ -628,6 +1341,28 @@ func (r *responseRecorder) Write(b []byte) (int, error) {
 	n, err := r.ResponseWriter.Write(b)
 	r.bytesWritten += n
 	return n, err
+}
+
+func (r *responseRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (r *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+func (r *responseRecorder) Push(target string, opts *http.PushOptions) error {
+	pusher, ok := r.ResponseWriter.(http.Pusher)
+	if !ok {
+		return http.ErrNotSupported
+	}
+	return pusher.Push(target, opts)
 }
 
 func logger(next http.Handler) http.Handler {

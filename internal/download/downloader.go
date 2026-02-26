@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -20,8 +22,9 @@ type Downloader struct {
 	outDir string
 
 	// Callbacks for progress and filename updates
-	onProgress func(id string, progress float64)
-	onFilename func(id string, filename string)
+	onProgress  func(id string, progress float64)
+	onFilename  func(id string, filename string)
+	onArtifacts func(id string, paths []string)
 }
 
 // NewDownloader creates a new Downloader with the specified output directory and callbacks.
@@ -41,6 +44,11 @@ func (d *Downloader) SetFilenameCallback(fn func(id string, filename string)) {
 	d.onFilename = fn
 }
 
+// SetArtifactCallback sets the callback for tracked artifact paths observed in yt-dlp logs.
+func (d *Downloader) SetArtifactCallback(fn func(id string, paths []string)) {
+	d.onArtifacts = fn
+}
+
 // Download executes a yt-dlp download for the given URL.
 // It blocks until the download completes or fails.
 func (d *Downloader) Download(ctx context.Context, id, url string) error {
@@ -49,35 +57,117 @@ func (d *Downloader) Download(ctx context.Context, id, url string) error {
 		return fmt.Errorf("yt_dlp_not_found: %w", err)
 	}
 
-	outTpl := filepath.Join(d.outDir, "%(title).200s-%(id)s.%(ext)s")
+	outTpl := "%(title).200s-%(id)s.%(ext)s"
+	tempDir := d.tempDirForID(id)
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
 
 	logging.LogYTDLPCommand(id, url, outTpl, false)
 
-	args := buildYTDLPArgs(url, outTpl)
+	args := buildYTDLPArgs(url, outTpl, d.outDir, tempDir, true)
 	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
 
 	if err := d.executeWithProgressTracking(id, cmd); err != nil {
-		return err
+		if ctx.Err() != nil || !shouldRetryWithoutThumbnail(err) {
+			return err
+		}
+		_ = os.RemoveAll(tempDir)
+		if mkErr := os.MkdirAll(tempDir, 0o755); mkErr != nil {
+			return fmt.Errorf("recreate temp dir for thumbnail fallback: %w", mkErr)
+		}
+
+		retryArgs := buildYTDLPArgs(url, outTpl, d.outDir, tempDir, false)
+		retryCmd := exec.CommandContext(ctx, "yt-dlp", retryArgs...)
+		if retryErr := d.executeWithProgressTracking(id, retryCmd); retryErr != nil {
+			return retryErr
+		}
 	}
+	_ = os.RemoveAll(tempDir)
 
 	logging.LogYTDLPCommand(id, url, outTpl, true)
 	return nil
 }
 
 // buildYTDLPArgs constructs the argument list for yt-dlp based on Rust reference
-func buildYTDLPArgs(url, outTpl string) []string {
-	return []string{
+func buildYTDLPArgs(url, outTpl, outDir, tempDir string, embedThumbnail bool) []string {
+	args := []string{
 		url,
 		"--progress-template", "download:%(progress)j",
 		"--newline",
 		"--continue",
+		"--paths", outDir,
+		"--paths", "temp:" + tempDir,
 		"--output", outTpl,
-		"--embed-thumbnail",
+	}
+	if embedThumbnail {
+		args = append(args, "--embed-thumbnail")
+	}
+	args = append(args,
 		// "--embed-subs",
 		"--embed-metadata",
 		"--embed-chapters",
 		"--windows-filenames",
+	)
+	return args
+}
+
+func shouldRetryWithoutThumbnail(err error) bool {
+	if err == nil {
+		return false
 	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "postprocessing: error opening output files")
+}
+
+func (d *Downloader) tempDirForID(id string) string {
+	return filepath.Join(d.outDir, ".yt-dlp-tmp", id)
+}
+
+// CleanupArtifacts removes per-download temporary artifacts and any known partial output.
+func (d *Downloader) CleanupArtifacts(id, filename string, trackedPaths []string) error {
+	var errs []error
+	if id != "" {
+		if err := os.RemoveAll(d.tempDirForID(id)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	candidates := make([]string, 0, len(trackedPaths)+1)
+	candidates = append(candidates, trackedPaths...)
+	if strings.TrimSpace(filename) != "" {
+		candidates = append(candidates, filename)
+	}
+
+	absOutDir, err := filepath.Abs(d.outDir)
+	if err != nil {
+		return err
+	}
+
+	for _, raw := range cleanArtifactPaths(candidates) {
+		fullPath := raw
+		if !filepath.IsAbs(fullPath) {
+			fullPath = filepath.Join(d.outDir, fullPath)
+		}
+		fullPath, err = filepath.Abs(fullPath)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		inside, err := pathWithin(absOutDir, fullPath)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !inside {
+			errs = append(errs, fmt.Errorf("refusing to delete file outside output dir: %s", fullPath))
+			continue
+		}
+		if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // executeWithProgressTracking runs the command and tracks progress
@@ -110,20 +200,23 @@ func (d *Downloader) executeWithProgressTracking(id string, cmd *exec.Cmd) error
 	}()
 	wg.Wait()
 
-	if err := cmd.Wait(); err != nil {
-		tail := tailString(stderrBuf.String(), 512)
-		if tail != "" {
-			return fmt.Errorf("yt-dlp: %w: %s", err, tail)
-		}
-		return fmt.Errorf("yt-dlp: %w", err)
+	waitErr := cmd.Wait()
+
+	// Extract filename and artifact paths from combined output.
+	combined := strings.TrimSpace(stdoutBuf.String() + "\n" + stderrBuf.String())
+	if paths := extractArtifactPaths(combined, d.outDir); len(paths) > 0 && d.onArtifacts != nil {
+		d.onArtifacts(id, paths)
 	}
 
-	// Extract filename from combined output (some yt-dlp messages go to stderr)
-	combined := strings.TrimSpace(stdoutBuf.String() + "\n" + stderrBuf.String())
-	if filename := extractFilename(combined); filename != "" {
-		if d.onFilename != nil {
-			d.onFilename(id, filename)
+	if waitErr != nil {
+		tail := tailString(stderrBuf.String(), 512)
+		if tail != "" {
+			return fmt.Errorf("yt-dlp: %w: %s", waitErr, tail)
 		}
+		return fmt.Errorf("yt-dlp: %w", waitErr)
+	}
+	if filename := extractFilename(combined); filename != "" && d.onFilename != nil {
+		d.onFilename(id, filename)
 	}
 
 	return nil
@@ -249,6 +342,109 @@ func extractFilename(output string) string {
 	default:
 		return ""
 	}
+}
+
+func extractArtifactPaths(output string, outDir string) []string {
+	lines := strings.Split(output, "\n")
+	seen := make(map[string]struct{}, 8)
+	out := make([]string, 0, 8)
+
+	add := func(raw string) {
+		path := normalizeArtifactPath(raw, outDir)
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "Destination:") {
+			parts := strings.SplitN(line, "Destination:", 2)
+			if len(parts) == 2 {
+				add(parts[1])
+			}
+			continue
+		}
+		if strings.Contains(line, "Merging formats into") {
+			if quoted := extractQuotedPath(line); quoted != "" {
+				add(quoted)
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "[download]") && strings.Contains(line, "has already been downloaded") {
+			if i := strings.Index(line, "] "); i != -1 {
+				rest := line[i+2:]
+				if j := strings.Index(rest, " has already been downloaded"); j != -1 {
+					add(rest[:j])
+					continue
+				}
+			}
+		}
+	}
+
+	return out
+}
+
+func extractQuotedPath(line string) string {
+	start := strings.IndexAny(line, "'\"")
+	if start == -1 {
+		return ""
+	}
+	quote := line[start]
+	rest := line[start+1:]
+	end := strings.IndexByte(rest, quote)
+	if end == -1 {
+		return ""
+	}
+	return rest[:end]
+}
+
+func normalizeArtifactPath(raw string, outDir string) string {
+	path := strings.TrimSpace(raw)
+	path = strings.Trim(path, `"'`)
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(outDir, path)
+	}
+	return filepath.Clean(path)
+}
+
+func pathWithin(base, target string) (bool, error) {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false, err
+	}
+	if rel == "." {
+		return true, nil
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..", nil
+}
+
+func cleanArtifactPaths(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 // scanCRorLF is like bufio.ScanLines but treats a bare '\r' as a line

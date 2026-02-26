@@ -211,8 +211,18 @@ func QueueRows(items []*download.Item) templ.Component {
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
+			} else if it.State == download.StatePaused {
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "<span class=\"badge paused\">paused</span>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			} else if it.State == download.StateCanceled {
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, "<span class=\"badge canceled\">canceled</span>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "</td><td class=\"p-2 border-b border-gray-200 align-middle\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "</td><td class=\"p-2 border-b border-gray-200 align-middle\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -220,123 +230,123 @@ func QueueRows(items []*download.Item) templ.Component {
 				var templ_7745c5c3_Var9 string
 				templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%dm%02ds", it.Duration/60, it.Duration%60))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 205, Col: 62}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 209, Col: 62}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, "</td><td class=\"p-2 border-b border-gray-200 align-middle\"><div class=\"progress\"><div class=\"bar\" data-progress=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, "</td><td class=\"p-2 border-b border-gray-200 align-middle\"><div class=\"progress\"><div class=\"bar\" data-progress=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var10 string
 			templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%.1f", it.Progress))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 209, Col: 91}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 213, Col: 91}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "\"></div></div><span class=\"pct\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 20, "\"></div></div><span class=\"pct\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var11 string
 			templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%.1f%%", it.Progress))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 210, Col: 58}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 214, Col: 58}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, "</span></td><td class=\"p-2 border-b border-gray-200 align-middle\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 21, "</span></td><td class=\"p-2 border-b border-gray-200 align-middle\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if it.Error != "" {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 20, "<span class=\"err\" title=\"")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 22, "<span class=\"err\" title=\"")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var12 string
 				templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(it.Error)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 214, Col: 39}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 218, Col: 39}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 21, "\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, "\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var13 string
 				templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(TruncateWithEllipsis(it.Error, 120))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 214, Col: 79}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 218, Col: 79}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 22, "</span>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 24, "</span>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, "</td><td class=\"p-2 border-b border-gray-200 align-middle\"><div class=\"flex gap-2\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 25, "</td><td class=\"p-2 border-b border-gray-200 align-middle\"><div class=\"flex gap-2\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if it.State == download.StateCompleted && it.Filename != "" {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 24, "<a href=\"")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 26, "<a href=\"")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var14 templ.SafeURL
 				templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinURLErrs(templ.SafeURL("/api/download_file?id=" + it.ID))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 221, Col: 61}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 225, Col: 61}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var14))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 25, "\" class=\"action-btn download-btn\" title=\"Download file\">📥</a> ")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 27, "\" class=\"action-btn download-btn\" title=\"Download file\">📥</a> ")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
 			if it.State != download.StateDownloading {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 26, "<form hx-post=\"/dashboard/remove\" hx-target=\"#remove-status\" hx-swap=\"innerHTML\" class=\"inline-form\"><input type=\"hidden\" name=\"id\" value=\"")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 28, "<form hx-post=\"/dashboard/remove\" hx-target=\"#remove-status\" hx-swap=\"innerHTML\" class=\"inline-form\"><input type=\"hidden\" name=\"id\" value=\"")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var15 string
 				templ_7745c5c3_Var15, templ_7745c5c3_Err = templ.JoinStringErrs(it.ID)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 235, Col: 51}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 239, Col: 51}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var15))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 27, "\"> <button type=\"submit\" class=\"action-btn remove-btn\" title=\"Remove from database\" hx-confirm=\"Are you sure you want to remove this item?\">🗑️</button></form>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 29, "\"> <button type=\"submit\" class=\"action-btn remove-btn\" title=\"Remove from database\" hx-confirm=\"Are you sure you want to remove this item?\">🗑️</button></form>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			} else {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 28, "<button class=\"action-btn remove-btn disabled\" title=\"Cannot remove while downloading\" disabled>🗑️</button>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 30, "<button class=\"action-btn remove-btn disabled\" title=\"Cannot remove while downloading\" disabled>🗑️</button>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 29, "</div></td></tr>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 31, "</div></td></tr>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -368,7 +378,7 @@ func DashboardLCARS(items []*download.Item) templ.Component {
 			templ_7745c5c3_Var16 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 30, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>VideoFetch LCARS Interface</title><link rel=\"icon\" type=\"image/x-icon\" href=\"/static/App.ico\"><script src=\"https://unpkg.com/htmx.org@1.9.12\" integrity=\"sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2\" crossorigin=\"anonymous\"></script><!-- Tailwind build (utilities + project styles) --><link rel=\"stylesheet\" href=\"/static/style.css\"><!-- LCARS structural styles (elbows/bars/units) --><link rel=\"stylesheet\" href=\"/static/lcars.css\"><script src=\"/static/lcars_audio.js\"></script><script>\n                // HTMX error handling\n                document.addEventListener('DOMContentLoaded', function() {\n                    let errorCount = 0;\n                    let maxErrors = 3;\n                    let isServerDown = false;\n                    let currentInterval = 1;\n                    const originalInterval = 1;\n                    const maxInterval = 30;\n\n                    function updatePollingInterval(intervalSeconds) {\n                        const queueDiv = document.getElementById('queue');\n                        if (queueDiv && !isServerDown) {\n                            queueDiv.setAttribute('hx-trigger', `load, every ${intervalSeconds}s, refresh`);\n                            htmx.process(queueDiv);\n                        }\n                    }\n\n                    document.body.addEventListener('htmx:sendError', function(evt) {\n                        errorCount++;\n                        console.log(`HTMX request failed (${errorCount}/${maxErrors}):`, evt.detail);\n\n                        if (errorCount >= maxErrors && !isServerDown) {\n                            isServerDown = true;\n                            const queueDiv = document.getElementById('queue');\n                            if (queueDiv) {\n                                queueDiv.removeAttribute('hx-trigger');\n                                queueDiv.innerHTML = '<div class=\"flex items-center justify-center h-full min-h-[300px]\"><div class=\"bg-[#cc6677] text-white p-6 border-2 border-[#ff6677] rounded-lg text-center max-w-md\"><div class=\"text-[18px] font-bold mb-2\">⚠️ CONNECTION TO STARFLEET COMMAND LOST</div><div class=\"text-[14px] opacity-90\">COMMUNICATION ARRAY OFFLINE - REFRESH WHEN CONNECTION RESTORED</div></div></div>';\n                            }\n                        } else if (errorCount > 0 && !isServerDown) {\n                            currentInterval = Math.min(currentInterval * 2, maxInterval);\n                            updatePollingInterval(currentInterval);\n                        }\n                    });\n\n                    document.body.addEventListener('htmx:afterRequest', function(evt) {\n                        if (evt.detail.successful) {\n                            if (errorCount > 0) {\n                                errorCount = 0;\n                                currentInterval = originalInterval;\n                                updatePollingInterval(currentInterval);\n                            }\n                            if (isServerDown) {\n                                isServerDown = false;\n                                location.reload();\n                            }\n                        }\n                    });\n\n                    // Update progress bars from data attributes\n                    function updateProgressBars() {\n                        document.querySelectorAll('.progress-bar[data-progress]').forEach(function(bar) {\n                            const progress = bar.getAttribute('data-progress');\n                            bar.style.width = progress + '%';\n                        });\n                    }\n\n                    // Update progress bars on load and after HTMX requests\n                    updateProgressBars();\n                    document.body.addEventListener('htmx:afterSwap', updateProgressBars);\n                });\n            </script></head><body class=\"m-0 p-0 bg-black text-[#FFFF99] overflow-x-hidden h-screen\"><div class=\"lcars-app-container\"><!-- HEADER --><div id=\"header\" class=\"lcars-row header\"><div class=\"lcars-elbow left-bottom lcars-golden-tanoi-bg\"></div><div class=\"lcars-bar horizontal\"><div class=\"lcars-title right\">VIDEOFETCH COMMAND INTERFACE</div></div><div class=\"lcars-bar horizontal right-end decorated\"></div></div><!-- SIDE MENU --><div id=\"left-menu\" class=\"lcars-column start-space lcars-u-1\"><div class=\"lcars-element button lcars-chestnut-rose-bg mb-1\">MAIN OPS</div><div class=\"lcars-element button lcars-pale-canary-bg mb-1\">QUEUE</div><div class=\"lcars-element button mb-1\">DOWNLOADS</div><div class=\"lcars-element button mb-1\">STATUS</div><div class=\"lcars-element button mb-1\">SETTINGS</div><a href=\"/dashboard\" class=\"no-underline text-current\"><div class=\"lcars-element button lcars-lavender-purple-bg mb-1\">CLASSIC UI</div></a><div class=\"lcars-bar lcars-u-1 flex-grow\"></div></div><!-- FOOTER --><div id=\"footer\" class=\"lcars-row\"><div class=\"lcars-elbow left-top lcars-golden-tanoi-bg\"></div><div class=\"lcars-bar horizontal both-divider bottom\"></div><div class=\"lcars-bar horizontal right-end left-divider bottom\"></div></div><!-- MAIN CONTAINER --><div id=\"container\" class=\"flex-1 flex flex-col p-4 gap-4 ml-[200px] mt-20 mb-20 overflow-y-auto\"><!-- URL INPUT SECTION --><div class=\"lcars-input-section bg-neutral-900 border-2 border-[#FFCC99] p-4 rounded-lg\"><div class=\"w-full mb-3 text-[#FFCC99] text-[16px] font-bold whitespace-nowrap overflow-hidden text-ellipsis\">MEDIA ACQUISITION PROTOCOL</div><form hx-post=\"/dashboard-lcars/enqueue\" hx-target=\"#enqueue-status\" hx-swap=\"innerHTML\" class=\"flex gap-3 items-center\"><input type=\"url\" name=\"url\" placeholder=\"ENTER MEDIA RESOURCE LOCATOR\" required class=\"flex-1 p-3 text-[14px] bg-black text-[#FFCC99] border border-[#FFCC99] rounded\"> <button type=\"submit\" class=\"lcars-element button lcars-atomic-tangerine-bg px-5 py-3 cursor-pointer font-bold rounded\">ENGAGE</button></form><div id=\"enqueue-status\" class=\"my-2 p-2 rounded border border-[#FFCC99] text-xs bg-[#FFCC99]/10 hidden\"></div><div id=\"remove-status\" class=\"my-2 p-2 rounded border border-[#FFCC99] text-xs bg-[#FFCC99]/10 hidden\"></div><div id=\"retry-status\" class=\"my-2 p-2 rounded border border-[#FFCC99] text-xs bg-[#FFCC99]/10 hidden\"></div></div><!-- CONTROLS SECTION --><div class=\"lcars-controls-section bg-black border-2 border-[#99CCFF] p-3 rounded-lg\"><form id=\"controls-form\" hx-get=\"/dashboard-lcars/rows\" hx-target=\"#queue\" hx-trigger=\"change\" hx-swap=\"innerHTML\" class=\"flex gap-4 justify-between\"><div class=\"lcars-text-box text-[#99CCFF]  font-bold\">FILTER CONTROLS:</div><div class=\"flex gap-4 justify-items-end\"><button hx-post=\"/dashboard-lcars/retry_failed\" hx-target=\"#retry-status\" hx-swap=\"innerHTML\" class=\"lcars-element button lcars-chestnut-rose-bg min-w-fit leading-relaxed px-4 py-2 cursor-pointer font-bold rounded text-white\" hx-confirm=\"CONFIRM RETRY ALL FAILED DOWNLOADS?\">RETRY FAILED</button> <label class=\"flex items-center gap-2\"><span class=\"text-[#99CCFF] font-bold\">STATUS:</span> <select name=\"status\" class=\"p-1 bg-black text-[#99CCFF] border border-[#99CCFF] rounded\"><option value=\"\">ALL</option> <option value=\"queued\">QUEUED</option> <option value=\"downloading\">DOWNLOADING</option> <option value=\"completed\">COMPLETED</option> <option value=\"failed\">FAILED</option></select></label> <label class=\"flex items-center gap-2\"><span class=\"text-[#99CCFF] font-bold\">SORT:</span> <select name=\"sort\" class=\"p-1 bg-black text-[#99CCFF] border border-[#99CCFF] rounded\"><option value=\"\">DEFAULT</option> <option value=\"date\">DATE</option> <option value=\"status\">STATUS</option> <option value=\"title\">TITLE</option> <option value=\"progress\">PROGRESS</option></select></label> <label class=\"flex items-center gap-2\"><span class=\"text-[#99CCFF] font-bold\">ORDER:</span> <select name=\"order\" class=\"p-1 bg-black text-[#99CCFF] border border-[#99CCFF] rounded\"><option value=\"desc\">DESC</option> <option value=\"asc\">ASC</option></select></label></div></form></div><!-- QUEUE DISPLAY --><div class=\"lcars-queue-section flex-1 bg-neutral-900 border-2 border-[#99FFCC] rounded-lg overflow-hidden flex flex-col\"><div class=\"p-4 bg-neutral-800 border-b border-[#99FFCC]\"><div class=\"w-full text-[#99FFCC] text-[18px] font-bold m-0 whitespace-nowrap overflow-hidden text-ellipsis\">DOWNLOAD QUEUE STATUS</div></div><div id=\"queue\" hx-get=\"/dashboard-lcars/rows\" hx-trigger=\"load, every 1s, refresh\" hx-include=\"#controls-form\" hx-target=\"#queue\" hx-swap=\"innerHTML\" class=\"flex-1 overflow-y-auto p-4\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 32, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>VideoFetch LCARS Interface</title><link rel=\"icon\" type=\"image/x-icon\" href=\"/static/App.ico\"><script src=\"https://unpkg.com/htmx.org@1.9.12\" integrity=\"sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2\" crossorigin=\"anonymous\"></script><!-- Tailwind build (utilities + project styles) --><link rel=\"stylesheet\" href=\"/static/style.css\"><!-- LCARS structural styles (elbows/bars/units) --><link rel=\"stylesheet\" href=\"/static/lcars.css\"><script src=\"/static/lcars_audio.js\"></script><script>\n                // HTMX error handling\n                document.addEventListener('DOMContentLoaded', function() {\n                    let errorCount = 0;\n                    let maxErrors = 3;\n                    let isServerDown = false;\n                    let currentInterval = 1;\n                    const originalInterval = 1;\n                    const maxInterval = 30;\n\n                    function updatePollingInterval(intervalSeconds) {\n                        const queueDiv = document.getElementById('queue');\n                        if (queueDiv && !isServerDown) {\n                            queueDiv.setAttribute('hx-trigger', `load, every ${intervalSeconds}s, refresh`);\n                            htmx.process(queueDiv);\n                        }\n                    }\n\n                    document.body.addEventListener('htmx:sendError', function(evt) {\n                        errorCount++;\n                        console.log(`HTMX request failed (${errorCount}/${maxErrors}):`, evt.detail);\n\n                        if (errorCount >= maxErrors && !isServerDown) {\n                            isServerDown = true;\n                            const queueDiv = document.getElementById('queue');\n                            if (queueDiv) {\n                                queueDiv.removeAttribute('hx-trigger');\n                                queueDiv.innerHTML = '<div class=\"flex items-center justify-center h-full min-h-[300px]\"><div class=\"bg-[#cc6677] text-white p-6 border-2 border-[#ff6677] rounded-lg text-center max-w-md\"><div class=\"text-[18px] font-bold mb-2\">⚠️ CONNECTION TO STARFLEET COMMAND LOST</div><div class=\"text-[14px] opacity-90\">COMMUNICATION ARRAY OFFLINE - REFRESH WHEN CONNECTION RESTORED</div></div></div>';\n                            }\n                        } else if (errorCount > 0 && !isServerDown) {\n                            currentInterval = Math.min(currentInterval * 2, maxInterval);\n                            updatePollingInterval(currentInterval);\n                        }\n                    });\n\n                    document.body.addEventListener('htmx:afterRequest', function(evt) {\n                        if (evt.detail.successful) {\n                            if (errorCount > 0) {\n                                errorCount = 0;\n                                currentInterval = originalInterval;\n                                updatePollingInterval(currentInterval);\n                            }\n                            if (isServerDown) {\n                                isServerDown = false;\n                                location.reload();\n                            }\n                        }\n                    });\n\n                    // Update progress bars from data attributes\n                    function updateProgressBars() {\n                        document.querySelectorAll('.progress-bar[data-progress]').forEach(function(bar) {\n                            const progress = bar.getAttribute('data-progress');\n                            bar.style.width = progress + '%';\n                        });\n                    }\n\n                    // Update progress bars on load and after HTMX requests\n                    updateProgressBars();\n                    document.body.addEventListener('htmx:afterSwap', updateProgressBars);\n                });\n            </script></head><body class=\"m-0 p-0 bg-black text-[#FFFF99] overflow-x-hidden h-screen\"><div class=\"lcars-app-container\"><!-- HEADER --><div id=\"header\" class=\"lcars-row header\"><div class=\"lcars-elbow left-bottom lcars-golden-tanoi-bg\"></div><div class=\"lcars-bar horizontal\"><div class=\"lcars-title right\">VIDEOFETCH COMMAND INTERFACE</div></div><div class=\"lcars-bar horizontal right-end decorated\"></div></div><!-- SIDE MENU --><div id=\"left-menu\" class=\"lcars-column start-space lcars-u-1\"><div class=\"lcars-element button lcars-chestnut-rose-bg mb-1\">MAIN OPS</div><div class=\"lcars-element button lcars-pale-canary-bg mb-1\">QUEUE</div><div class=\"lcars-element button mb-1\">DOWNLOADS</div><div class=\"lcars-element button mb-1\">STATUS</div><div class=\"lcars-element button mb-1\">SETTINGS</div><a href=\"/dashboard\" class=\"no-underline text-current\"><div class=\"lcars-element button lcars-lavender-purple-bg mb-1\">CLASSIC UI</div></a><div class=\"lcars-bar lcars-u-1 flex-grow\"></div></div><!-- FOOTER --><div id=\"footer\" class=\"lcars-row\"><div class=\"lcars-elbow left-top lcars-golden-tanoi-bg\"></div><div class=\"lcars-bar horizontal both-divider bottom\"></div><div class=\"lcars-bar horizontal right-end left-divider bottom\"></div></div><!-- MAIN CONTAINER --><div id=\"container\" class=\"flex-1 flex flex-col p-4 gap-4 ml-[200px] mt-20 mb-20 overflow-y-auto\"><!-- URL INPUT SECTION --><div class=\"lcars-input-section bg-neutral-900 border-2 border-[#FFCC99] p-4 rounded-lg\"><div class=\"w-full mb-3 text-[#FFCC99] text-[16px] font-bold whitespace-nowrap overflow-hidden text-ellipsis\">MEDIA ACQUISITION PROTOCOL</div><form hx-post=\"/dashboard-lcars/enqueue\" hx-target=\"#enqueue-status\" hx-swap=\"innerHTML\" class=\"flex gap-3 items-center\"><input type=\"url\" name=\"url\" placeholder=\"ENTER MEDIA RESOURCE LOCATOR\" required class=\"flex-1 p-3 text-[14px] bg-black text-[#FFCC99] border border-[#FFCC99] rounded\"> <button type=\"submit\" class=\"lcars-element button lcars-atomic-tangerine-bg px-5 py-3 cursor-pointer font-bold rounded\">ENGAGE</button></form><div id=\"enqueue-status\" class=\"my-2 p-2 rounded border border-[#FFCC99] text-xs bg-[#FFCC99]/10 hidden\"></div><div id=\"remove-status\" class=\"my-2 p-2 rounded border border-[#FFCC99] text-xs bg-[#FFCC99]/10 hidden\"></div><div id=\"retry-status\" class=\"my-2 p-2 rounded border border-[#FFCC99] text-xs bg-[#FFCC99]/10 hidden\"></div></div><!-- CONTROLS SECTION --><div class=\"lcars-controls-section bg-black border-2 border-[#99CCFF] p-3 rounded-lg\"><form id=\"controls-form\" hx-get=\"/dashboard-lcars/rows\" hx-target=\"#queue\" hx-trigger=\"change\" hx-swap=\"innerHTML\" class=\"flex gap-4 justify-between\"><div class=\"lcars-text-box text-[#99CCFF]  font-bold\">FILTER CONTROLS:</div><div class=\"flex gap-4 justify-items-end\"><button hx-post=\"/dashboard-lcars/retry_failed\" hx-target=\"#retry-status\" hx-swap=\"innerHTML\" class=\"lcars-element button lcars-chestnut-rose-bg min-w-fit leading-relaxed px-4 py-2 cursor-pointer font-bold rounded text-white\" hx-confirm=\"CONFIRM RETRY ALL FAILED DOWNLOADS?\">RETRY FAILED</button> <label class=\"flex items-center gap-2\"><span class=\"text-[#99CCFF] font-bold\">STATUS:</span> <select name=\"status\" class=\"p-1 bg-black text-[#99CCFF] border border-[#99CCFF] rounded\"><option value=\"\">ALL</option> <option value=\"queued\">QUEUED</option> <option value=\"downloading\">DOWNLOADING</option> <option value=\"completed\">COMPLETED</option> <option value=\"failed\">FAILED</option></select></label> <label class=\"flex items-center gap-2\"><span class=\"text-[#99CCFF] font-bold\">SORT:</span> <select name=\"sort\" class=\"p-1 bg-black text-[#99CCFF] border border-[#99CCFF] rounded\"><option value=\"\">DEFAULT</option> <option value=\"date\">DATE</option> <option value=\"status\">STATUS</option> <option value=\"title\">TITLE</option> <option value=\"progress\">PROGRESS</option></select></label> <label class=\"flex items-center gap-2\"><span class=\"text-[#99CCFF] font-bold\">ORDER:</span> <select name=\"order\" class=\"p-1 bg-black text-[#99CCFF] border border-[#99CCFF] rounded\"><option value=\"desc\">DESC</option> <option value=\"asc\">ASC</option></select></label></div></form></div><!-- QUEUE DISPLAY --><div class=\"lcars-queue-section flex-1 bg-neutral-900 border-2 border-[#99FFCC] rounded-lg overflow-hidden flex flex-col\"><div class=\"p-4 bg-neutral-800 border-b border-[#99FFCC]\"><div class=\"w-full text-[#99FFCC] text-[18px] font-bold m-0 whitespace-nowrap overflow-hidden text-ellipsis\">DOWNLOAD QUEUE STATUS</div></div><div id=\"queue\" hx-get=\"/dashboard-lcars/rows\" hx-trigger=\"load, every 1s, refresh\" hx-include=\"#controls-form\" hx-target=\"#queue\" hx-swap=\"innerHTML\" class=\"flex-1 overflow-y-auto p-4\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -376,7 +386,7 @@ func DashboardLCARS(items []*download.Item) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 31, "</div></div></div></div><audio id=\"audDummy\"></audio></body></html>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 33, "</div></div></div></div><audio id=\"audDummy\"></audio></body></html>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -407,12 +417,12 @@ func QueueTableLCARS(items []*download.Item) templ.Component {
 		}
 		ctx = templ.ClearChildren(ctx)
 		if len(items) == 0 {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 32, "<div class=\"text-center p-8 text-[#CCCCCC]\"><div class=\"lcars-text-box large\">NO ACTIVE DOWNLOADS</div><div class=\"mt-2 text-[12px]\">QUEUE IS EMPTY</div></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 34, "<div class=\"text-center p-8 text-[#CCCCCC]\"><div class=\"lcars-text-box large\">NO ACTIVE DOWNLOADS</div><div class=\"mt-2 text-[12px]\">QUEUE IS EMPTY</div></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 33, "<div class=\"flex flex-col gap-[6px]\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 35, "<div class=\"flex flex-col gap-[6px]\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -422,7 +432,7 @@ func QueueTableLCARS(items []*download.Item) templ.Component {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 34, "</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 36, "</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -453,35 +463,35 @@ func QueueRowLCARS(it *download.Item) templ.Component {
 			templ_7745c5c3_Var18 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 35, "<div class=\"mb-3 border-2 border-[#666666] bg-black/90 rounded-lg hover:border-[#FFCC99] transition-colors\"><div class=\"p-4 flex gap-4 items-start\"><!-- Thumbnail --><div class=\"w-[90px] h-[68px] flex items-center justify-center bg-neutral-800 border border-neutral-600 rounded-md overflow-hidden\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 37, "<div class=\"mb-3 border-2 border-[#666666] bg-black/90 rounded-lg hover:border-[#FFCC99] transition-colors\"><div class=\"p-4 flex gap-4 items-start\"><!-- Thumbnail --><div class=\"w-[90px] h-[68px] flex items-center justify-center bg-neutral-800 border border-neutral-600 rounded-md overflow-hidden\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		if it.ThumbnailURL != "" {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 36, "<img src=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 38, "<img src=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var19 string
 			templ_7745c5c3_Var19, templ_7745c5c3_Err = templ.JoinStringErrs(it.ThumbnailURL)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 461, Col: 31}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 465, Col: 31}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var19))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 37, "\" alt=\"thumb\" class=\"max-w-[88px] max-h-[66px] object-cover rounded\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 39, "\" alt=\"thumb\" class=\"max-w-[88px] max-h-[66px] object-cover rounded\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 38, "<div class=\"text-[#666] text-[10px] text-center\">NO<br>IMAGE</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 40, "<div class=\"text-[#666] text-[10px] text-center\">NO<br>IMAGE</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 39, "</div><!-- Main Content --><div class=\"flex-1 min-w-0\"><div class=\"font-bold text-[15px] mb-[6px] text-[#FFCC99] whitespace-nowrap overflow-hidden text-ellipsis leading-[1.2]\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "</div><!-- Main Content --><div class=\"flex-1 min-w-0\"><div class=\"font-bold text-[15px] mb-[6px] text-[#FFCC99] whitespace-nowrap overflow-hidden text-ellipsis leading-[1.2]\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -489,7 +499,7 @@ func QueueRowLCARS(it *download.Item) templ.Component {
 			var templ_7745c5c3_Var20 string
 			templ_7745c5c3_Var20, templ_7745c5c3_Err = templ.JoinStringErrs(it.Title)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 470, Col: 16}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 474, Col: 16}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var20))
 			if templ_7745c5c3_Err != nil {
@@ -499,202 +509,202 @@ func QueueRowLCARS(it *download.Item) templ.Component {
 			var templ_7745c5c3_Var21 string
 			templ_7745c5c3_Var21, templ_7745c5c3_Err = templ.JoinStringErrs(it.URL)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 472, Col: 14}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 476, Col: 14}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var21))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 40, "</div><div class=\"text-[11px] text-[#999] mb-2 whitespace-nowrap overflow-hidden text-ellipsis\"><a href=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "</div><div class=\"text-[11px] text-[#999] mb-2 whitespace-nowrap overflow-hidden text-ellipsis\"><a href=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var22 templ.SafeURL
 		templ_7745c5c3_Var22, templ_7745c5c3_Err = templ.JoinURLErrs(it.URL)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 476, Col: 21}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 480, Col: 21}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var22))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "\" target=\"_blank\" rel=\"noreferrer\" class=\"text-[#999] no-underline\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, "\" target=\"_blank\" rel=\"noreferrer\" class=\"text-[#999] no-underline\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var23 string
 		templ_7745c5c3_Var23, templ_7745c5c3_Err = templ.JoinStringErrs(it.URL)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 476, Col: 98}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 480, Col: 98}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var23))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "</a></div><!-- Progress Bar --><div class=\"bg-neutral-800 h-3 border border-neutral-600 rounded-md overflow-hidden\"><div class=\"h-full bg-gradient-to-r from-[#FFCC99] to-[#FF9966] transition-all progress-bar\" data-progress=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "</a></div><!-- Progress Bar --><div class=\"bg-neutral-800 h-3 border border-neutral-600 rounded-md overflow-hidden\"><div class=\"h-full bg-gradient-to-r from-[#FFCC99] to-[#FF9966] transition-all progress-bar\" data-progress=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var24 string
 		templ_7745c5c3_Var24, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%.1f", it.Progress))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 480, Col: 146}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 484, Col: 146}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var24))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, "\"></div></div><div class=\"text-[12px] text-[#CCC] mt-[6px] font-bold\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "\"></div></div><div class=\"text-[12px] text-[#CCC] mt-[6px] font-bold\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var25 string
 		templ_7745c5c3_Var25, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%.1f%%", it.Progress))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 483, Col: 41}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 487, Col: 41}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var25))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, " COMPLETE ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, " COMPLETE ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		if it.Duration > 0 {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "<span class=\"ml-3\">DURATION: ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "<span class=\"ml-3\">DURATION: ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var26 string
 			templ_7745c5c3_Var26, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%dm%02ds", it.Duration/60, it.Duration%60))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 485, Col: 92}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 489, Col: 92}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var26))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, "</span>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, "</span>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "</div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 49, "</div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		if it.Error != "" {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, "<div class=\"bg-[#cc6677] text-white p-1 mt-[6px] text-[10px] border border-[#ff9999] rounded\" title=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 50, "<div class=\"bg-[#cc6677] text-white p-1 mt-[6px] text-[10px] border border-[#ff9999] rounded\" title=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var27 string
 			templ_7745c5c3_Var27, templ_7745c5c3_Err = templ.JoinStringErrs(it.Error)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 489, Col: 115}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 493, Col: 115}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var27))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 49, "\">ERROR: ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "\">ERROR: ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var28 string
 			templ_7745c5c3_Var28, templ_7745c5c3_Err = templ.JoinStringErrs(TruncateWithEllipsis(it.Error, 120))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 490, Col: 50}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 494, Col: 50}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var28))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 50, "</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 52, "</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "</div><!-- Status and Actions --><div class=\"flex flex-col gap-[6px] min-w-[90px] items-stretch\"><!-- Status Badge -->")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 53, "</div><!-- Status and Actions --><div class=\"flex flex-col gap-[6px] min-w-[90px] items-stretch\"><!-- Status Badge -->")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		if it.State == download.StateQueued {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 52, "<div class=\"px-2 py-2 bg-[#FFCC99] text-black text-[11px] font-bold text-center rounded border border-[#FFCC99]\">QUEUED</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 54, "<div class=\"px-2 py-2 bg-[#FFCC99] text-black text-[11px] font-bold text-center rounded border border-[#FFCC99]\">QUEUED</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		} else if it.State == download.StateDownloading {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 53, "<div class=\"px-2 py-2 bg-[#99CCFF] text-black text-[11px] font-bold text-center rounded border border-[#99CCFF]\">ACTIVE</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 55, "<div class=\"px-2 py-2 bg-[#99CCFF] text-black text-[11px] font-bold text-center rounded border border-[#99CCFF]\">ACTIVE</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		} else if it.State == download.StateCompleted {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 54, "<div class=\"px-2 py-2 bg-[#99CC99] text-black text-[11px] font-bold text-center rounded border border-[#99CC99]\">COMPLETE</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 56, "<div class=\"px-2 py-2 bg-[#99CC99] text-black text-[11px] font-bold text-center rounded border border-[#99CC99]\">COMPLETE</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		} else if it.State == download.StateFailed {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 55, "<div class=\"px-2 py-2 bg-[#cc6677] text-white text-[11px] font-bold text-center rounded border border-[#cc6677]\">FAILED</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 57, "<div class=\"px-2 py-2 bg-[#cc6677] text-white text-[11px] font-bold text-center rounded border border-[#cc6677]\">FAILED</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 56, "<div class=\"px-2 py-2 bg-[#666666] text-[#999999] text-[11px] font-bold text-center rounded border border-[#666666]\">UNKNOWN</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 58, "<div class=\"px-2 py-2 bg-[#666666] text-[#999999] text-[11px] font-bold text-center rounded border border-[#666666]\">UNKNOWN</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 57, "<!-- Actions -->")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 59, "<!-- Actions -->")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		if it.State == download.StateCompleted && it.Filename != "" {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 58, "<a href=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 60, "<a href=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var29 templ.SafeURL
 			templ_7745c5c3_Var29, templ_7745c5c3_Err = templ.JoinURLErrs(templ.SafeURL("/api/download_file?id=" + it.ID))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 510, Col: 62}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 514, Col: 62}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var29))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 59, "\" class=\"px-2 py-2 button lcars-lavender-purple-bg lcars-atomic-tangerine-bg text-black no-underline text-[10px] font-bold text-center rounded border transition-colors\">RETRIEVE</a> ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 61, "\" class=\"px-2 py-2 button lcars-lavender-purple-bg lcars-atomic-tangerine-bg text-black no-underline text-[10px] font-bold text-center rounded border transition-colors\">RETRIEVE</a> ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
 		if it.State != download.StateDownloading {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 60, "<form hx-post=\"/dashboard-lcars/remove\" hx-target=\"#remove-status\" hx-swap=\"innerHTML\" class=\"block\"><input type=\"hidden\" name=\"id\" value=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 62, "<form hx-post=\"/dashboard-lcars/remove\" hx-target=\"#remove-status\" hx-swap=\"innerHTML\" class=\"block\"><input type=\"hidden\" name=\"id\" value=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var30 string
 			templ_7745c5c3_Var30, templ_7745c5c3_Err = templ.JoinStringErrs(it.ID)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 514, Col: 50}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/ui/dashboard.templ`, Line: 518, Col: 50}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var30))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 61, "\"> <button type=\"submit\" class=\"w-full px-2 py-2 bg-[#cc6677] text-white border border-[#cc6677] cursor-pointer text-[10px] font-bold rounded transition-colors\" hx-confirm=\"CONFIRM DELETION OF THIS RECORD?\">PURGE</button></form>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 63, "\"> <button type=\"submit\" class=\"w-full px-2 py-2 bg-[#cc6677] text-white border border-[#cc6677] cursor-pointer text-[10px] font-bold rounded transition-colors\" hx-confirm=\"CONFIRM DELETION OF THIS RECORD?\">PURGE</button></form>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 62, "<div class=\"px-2 py-2 bg-[#333333] text-[#666666] text-[10px] font-bold text-center rounded border border-[#333333]\">LOCKED</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 64, "<div class=\"px-2 py-2 bg-[#333333] text-[#666666] text-[10px] font-bold text-center rounded border border-[#333333]\">LOCKED</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 63, "</div></div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 65, "</div></div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

@@ -49,6 +49,28 @@ func TestDashboard_Rows_OK(t *testing.T) {
 	}
 }
 
+func TestDashboard_Rows_RenderPausedAndCanceledBadges(t *testing.T) {
+	items := []*download.Item{
+		{ID: "id-paused", URL: "https://example.com/paused", Progress: 42, State: download.StatePaused},
+		{ID: "id-canceled", URL: "https://example.com/canceled", Progress: 42, State: download.StateCanceled},
+	}
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return items },
+	}, nil, "/tmp/test")
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/rows", nil)
+	req.Header.Set("X-Forwarded-For", "198.51.100.22")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "paused") || !strings.Contains(body, "canceled") {
+		t.Fatalf("rows html missing paused/canceled badges: %q", body)
+	}
+}
+
 func TestDashboard_Enqueue_OK_And_Invalid(t *testing.T) {
 	// With async pattern, Enqueue isn't called directly from the handler
 	h := New(&mockMgr{
@@ -106,9 +128,30 @@ func TestDashboard_Enqueue_CreateFailure(t *testing.T) {
 type mockMgr struct {
 	enqueueFn  func(url string) (string, error)
 	snapshotFn func(id string) []*download.Item
+	pauseFn    func(dbID int64) bool
+	cancelFn   func(dbID int64) bool
+	resumeFn   func(dbID int64) (bool, error)
 }
 
 func (m *mockMgr) Enqueue(url string) (string, error)                            { return m.enqueueFn(url) }
 func (m *mockMgr) Snapshot(id string) []*download.Item                           { return m.snapshotFn(id) }
 func (m *mockMgr) AttachDB(id string, dbID int64)                                {}
 func (m *mockMgr) SetMeta(id string, title string, duration int64, thumb string) {}
+func (m *mockMgr) PauseByDBID(dbID int64) bool {
+	if m.pauseFn == nil {
+		return false
+	}
+	return m.pauseFn(dbID)
+}
+func (m *mockMgr) CancelByDBID(dbID int64) bool {
+	if m.cancelFn == nil {
+		return false
+	}
+	return m.cancelFn(dbID)
+}
+func (m *mockMgr) ResumeByDBID(dbID int64) (bool, error) {
+	if m.resumeFn == nil {
+		return false, nil
+	}
+	return m.resumeFn(dbID)
+}

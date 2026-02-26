@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +26,8 @@ const (
 	StateDownloading State = "downloading"
 	StateCompleted   State = "completed"
 	StateFailed      State = "failed"
+	StatePaused      State = "paused"
+	StateCanceled    State = "canceled"
 )
 
 const pendingMetadataTimeout = 30 * time.Second
@@ -59,21 +64,25 @@ type Item struct {
 	// Filename gets set when download is complete.
 	Filename string `json:"filename,omitempty"`
 
-	startedAt time.Time
-	updatedAt time.Time
+	startedAt  time.Time
+	updatedAt  time.Time
+	queueToken uint64
 }
 
 type job struct {
-	id  string
-	url string
+	id    string
+	url   string
+	token uint64
 }
 
 type Manager struct {
 	outDir string
 
-	jobs    chan job
-	wg      sync.WaitGroup
-	closing atomic.Bool
+	queueMu    sync.Mutex
+	jobsClosed bool
+	jobs       chan job
+	wg         sync.WaitGroup
+	closing    atomic.Bool
 
 	runCtx    context.Context
 	runCancel context.CancelFunc
@@ -91,6 +100,23 @@ type Manager struct {
 	store Store
 
 	workerDownload func(ctx context.Context, id, url string) error
+
+	activeMu    sync.Mutex
+	activeByID  map[string]*activeDownload
+	activeByDB  map[int64]*activeDownload
+	stopIntents map[string]State
+
+	artifactMu sync.Mutex
+	artifacts  map[string]map[string]struct{}
+
+	artifactPersistMu   sync.Mutex
+	artifactPersistByID map[string]*sync.Mutex
+}
+
+type activeDownload struct {
+	id     string
+	dbID   int64
+	cancel context.CancelFunc
 }
 
 // Store interface defines methods for persisting download state
@@ -98,6 +124,7 @@ type Store interface {
 	UpdateProgress(ctx context.Context, id int64, progress float64) error
 	UpdateStatus(ctx context.Context, id int64, status, errMsg string) error
 	UpdateFilename(ctx context.Context, id int64, filename string) error
+	UpdateArtifacts(ctx context.Context, id int64, paths []string) error
 }
 
 // PendingDownloadStore defines methods needed to process pending downloads from the database
@@ -116,16 +143,22 @@ func NewManager(outputDir string, workers, queueCap int) *Manager {
 	}
 
 	m := &Manager{
-		outDir:     outputDir,
-		jobs:       make(chan job, queueCap),
-		registry:   NewItemRegistry(queueCap * 2),
-		downloader: NewDownloader(outputDir),
+		outDir:              outputDir,
+		jobs:                make(chan job, queueCap),
+		registry:            NewItemRegistry(queueCap * 2),
+		downloader:          NewDownloader(outputDir),
+		activeByID:          make(map[string]*activeDownload, queueCap),
+		activeByDB:          make(map[int64]*activeDownload, queueCap),
+		stopIntents:         make(map[string]State, queueCap),
+		artifacts:           make(map[string]map[string]struct{}, queueCap),
+		artifactPersistByID: make(map[string]*sync.Mutex, queueCap),
 	}
 	m.runCtx, m.runCancel = context.WithCancel(context.Background())
 
 	// Set up downloader callbacks
 	m.downloader.SetProgressCallback(m.updateProgress)
 	m.downloader.SetFilenameCallback(m.setFilename)
+	m.downloader.SetArtifactCallback(m.recordArtifacts)
 
 	// Start workers
 	for i := 0; i < workers; i++ {
@@ -151,6 +184,7 @@ func (m *Manager) SetDownloader(downloader *Downloader) {
 	// Re-setup callbacks
 	m.downloader.SetProgressCallback(m.updateProgress)
 	m.downloader.SetFilenameCallback(m.setFilename)
+	m.downloader.SetArtifactCallback(m.recordArtifacts)
 }
 
 // StopAccepting stops queueing new jobs; Enqueue will return an error afterwards.
@@ -167,6 +201,9 @@ func (m *Manager) Shutdown() {
 	}
 	// Close the jobs channel exactly once
 	m.shutdownOnce.Do(func() {
+		m.queueMu.Lock()
+		defer m.queueMu.Unlock()
+		m.jobsClosed = true
 		close(m.jobs)
 	})
 	// Wait for workers to finish current job
@@ -189,14 +226,12 @@ func (m *Manager) Enqueue(url string) (string, error) {
 		return "", fmt.Errorf("failed to create item: %w", err)
 	}
 
-	select {
-	case m.jobs <- job{id: id, url: url}:
+	if m.enqueueJob(job{id: id, url: url, token: m.bumpQueueToken(id)}) {
 		return id, nil
-	default:
-		// queue full, remove the entry we just added
-		m.registry.Delete(id)
-		return "", ErrQueueFull
 	}
+	// queue full, remove the entry we just added
+	m.registry.Delete(id)
+	return "", ErrQueueFull
 }
 
 // AttachDB binds a database row ID to the in-memory item for persistence updates.
@@ -204,7 +239,9 @@ func (m *Manager) AttachDB(id string, dbID int64) {
 	if err := m.registry.Attach(id, dbID); err != nil {
 		// Log but don't fail - this is a best-effort operation
 		slog.Debug("failed to attach DB ID to item", "id", id, "db_id", dbID, "error", err)
+		return
 	}
+	m.bindActiveDBID(id, dbID)
 }
 
 // SetMeta updates the in-memory item with extracted metadata for UI.
@@ -223,22 +260,51 @@ func (m *Manager) Snapshot(id string) []*Item {
 func (m *Manager) worker(idx int) {
 	defer m.wg.Done()
 	for j := range m.jobs {
+		if !m.claimQueuedJob(j.id, j.token) {
+			continue
+		}
+
 		m.updateState(j.id, StateDownloading, "")
+		item := m.registry.Get(j.id)
 
 		ctx := m.runCtx
 		if ctx == nil {
 			ctx = context.Background()
 		}
+		jobCtx, cancel := context.WithCancel(ctx)
+
+		var dbID int64
+		if item != nil {
+			dbID = item.DBID
+		}
+		m.registerActive(j.id, dbID, cancel)
+		if current := m.registry.Get(j.id); current != nil && current.DBID > 0 {
+			m.bindActiveDBID(j.id, current.DBID)
+		}
+
 		downloadFn := m.workerDownload
 		if downloadFn == nil {
 			downloadFn = m.downloader.Download
 		}
 
-		if err := downloadFn(ctx, j.id, j.url); err != nil {
+		if err := downloadFn(jobCtx, j.id, j.url); err != nil {
+			cancel()
+			m.unregisterActive(j.id)
+			if desired, ok := m.consumeStopIntent(j.id); ok {
+				m.updateState(j.id, desired, "")
+				if desired == StateCanceled {
+					m.cleanupCanceledArtifacts(j.id)
+				}
+				continue
+			}
 			m.updateFailure(j.id, err)
 		} else {
+			cancel()
+			m.unregisterActive(j.id)
+			_, _ = m.consumeStopIntent(j.id)
 			m.updateProgress(j.id, 100)
 			m.updateState(j.id, StateCompleted, "")
+			m.persistAndClearArtifacts(j.id)
 		}
 	}
 }
@@ -332,6 +398,10 @@ func (m *Manager) updateState(id string, st State, errMsg string) {
 				statusStr = "completed"
 			case StateFailed:
 				statusStr = "error"
+			case StatePaused:
+				statusStr = "paused"
+			case StateCanceled:
+				statusStr = "canceled"
 			default:
 				statusStr = "pending"
 			}
@@ -356,6 +426,315 @@ func (m *Manager) updateState(id string, st State, errMsg string) {
 	}
 }
 
+// PauseByDBID pauses an active or queued download by database ID.
+// Returns true if a matching item was found and pause intent was applied.
+func (m *Manager) PauseByDBID(dbID int64) bool {
+	if dbID <= 0 {
+		return false
+	}
+	if m.requestStopByDBID(dbID, StatePaused) {
+		return true
+	}
+	if item := m.registry.GetWithDBID(dbID); item != nil {
+		switch item.State {
+		case StateQueued:
+			var current State
+			if err := m.registry.Update(item.ID, func(it *Item) {
+				current = it.State
+				if it.State == StateQueued {
+					it.State = StatePaused
+					it.Error = ""
+				}
+			}); err != nil {
+				return false
+			}
+			switch current {
+			case StateQueued:
+				if !m.closing.Load() {
+					_ = m.dropQueuedJobsByID(item.ID)
+				}
+				m.updateState(item.ID, StatePaused, "")
+				return true
+			case StateDownloading:
+				return m.requestStopByDBID(dbID, StatePaused)
+			case StatePaused:
+				return true
+			case StateFailed, StateCanceled:
+				m.updateState(item.ID, StatePaused, "")
+				return true
+			}
+			return false
+		case StateDownloading:
+			return m.requestStopByDBID(dbID, StatePaused)
+		case StateFailed, StateCanceled:
+			m.updateState(item.ID, StatePaused, "")
+			return true
+		case StatePaused:
+			return true
+		}
+	}
+	return false
+}
+
+// CancelByDBID cancels an active or queued download by database ID.
+// Returns true if a matching item was found and cancel intent was applied.
+func (m *Manager) CancelByDBID(dbID int64) bool {
+	if dbID <= 0 {
+		return false
+	}
+	if m.requestStopByDBID(dbID, StateCanceled) {
+		return true
+	}
+	if item := m.registry.GetWithDBID(dbID); item != nil {
+		switch item.State {
+		case StateQueued:
+			var (
+				current State
+				updated bool
+			)
+			if err := m.registry.Update(item.ID, func(it *Item) {
+				current = it.State
+				if it.State == StateQueued {
+					it.State = StateCanceled
+					it.Error = ""
+					updated = true
+				}
+			}); err != nil {
+				return false
+			}
+			if updated {
+				if !m.closing.Load() {
+					_ = m.dropQueuedJobsByID(item.ID)
+				}
+				m.updateState(item.ID, StateCanceled, "")
+				m.cleanupCanceledArtifacts(item.ID)
+				return true
+			}
+			switch current {
+			case StateDownloading:
+				return m.requestStopByDBID(dbID, StateCanceled)
+			case StatePaused, StateFailed:
+				m.updateState(item.ID, StateCanceled, "")
+				m.cleanupCanceledArtifacts(item.ID)
+				return true
+			case StateCanceled:
+				return true
+			}
+			return false
+		case StatePaused, StateFailed:
+			m.updateState(item.ID, StateCanceled, "")
+			m.cleanupCanceledArtifacts(item.ID)
+			return true
+		case StateDownloading:
+			return m.requestStopByDBID(dbID, StateCanceled)
+		case StateCanceled:
+			return true
+		}
+	}
+	return false
+}
+
+// ResumeByDBID resumes a paused/canceled/failed download in-memory if possible.
+// Returns true when resumed directly in manager queue.
+func (m *Manager) ResumeByDBID(dbID int64) (bool, error) {
+	if dbID <= 0 {
+		return false, nil
+	}
+	item := m.registry.GetWithDBID(dbID)
+	if item == nil {
+		return false, nil
+	}
+	if item.State == StateDownloading {
+		return true, nil
+	}
+	if item.State == StateQueued {
+		return true, nil
+	}
+	if item.State == StateCompleted {
+		return false, nil
+	}
+	if m.closing.Load() {
+		return false, ErrShuttingDown
+	}
+	prevState := item.State
+	prevProgress := item.Progress
+	prevFilename := item.Filename
+	prevError := item.Error
+	prevQueueToken := item.queueToken
+	var token uint64
+	if err := m.registry.Update(item.ID, func(it *Item) {
+		if it.State == StateCanceled || it.State == StateFailed {
+			it.Progress = 0
+			it.Filename = ""
+		}
+		it.State = StateQueued
+		it.Error = ""
+		it.queueToken++
+		token = it.queueToken
+	}); err != nil {
+		return false, err
+	}
+	if m.enqueueJob(job{id: item.ID, url: item.URL, token: token}) {
+		return true, nil
+	}
+	_ = m.registry.Update(item.ID, func(it *Item) {
+		if it.State != StateQueued || it.queueToken != token {
+			return
+		}
+		it.State = prevState
+		it.Progress = prevProgress
+		it.Filename = prevFilename
+		it.Error = prevError
+		it.queueToken = prevQueueToken
+	})
+	return false, ErrQueueFull
+}
+
+func (m *Manager) bumpQueueToken(id string) uint64 {
+	var token uint64
+	_ = m.registry.Update(id, func(it *Item) {
+		it.queueToken++
+		token = it.queueToken
+	})
+	return token
+}
+
+func (m *Manager) claimQueuedJob(id string, token uint64) bool {
+	claimed := false
+	_ = m.registry.Update(id, func(it *Item) {
+		if it.State != StateQueued || it.queueToken != token {
+			return
+		}
+		it.State = StateDownloading
+		it.Error = ""
+		claimed = true
+	})
+	return claimed
+}
+
+func (m *Manager) enqueueJob(next job) bool {
+	m.queueMu.Lock()
+	defer m.queueMu.Unlock()
+	if m.jobsClosed {
+		return false
+	}
+
+	select {
+	case m.jobs <- next:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Manager) dropQueuedJobsByID(id string) int {
+	if id == "" {
+		return 0
+	}
+
+	m.queueMu.Lock()
+	defer m.queueMu.Unlock()
+	if m.jobsClosed {
+		return 0
+	}
+
+	kept := make([]job, 0, len(m.jobs))
+	removed := 0
+	for {
+		select {
+		case queued, ok := <-m.jobs:
+			if !ok {
+				return removed
+			}
+			if queued.id == id {
+				removed++
+				continue
+			}
+			kept = append(kept, queued)
+		default:
+			for _, queued := range kept {
+				m.jobs <- queued
+			}
+			return removed
+		}
+	}
+}
+
+func (m *Manager) registerActive(id string, dbID int64, cancel context.CancelFunc) {
+	m.activeMu.Lock()
+	defer m.activeMu.Unlock()
+	entry := &activeDownload{id: id, dbID: dbID, cancel: cancel}
+	m.activeByID[id] = entry
+	if dbID > 0 {
+		m.activeByDB[dbID] = entry
+	}
+}
+
+func (m *Manager) unregisterActive(id string) {
+	m.activeMu.Lock()
+	defer m.activeMu.Unlock()
+	entry, ok := m.activeByID[id]
+	if !ok {
+		return
+	}
+	delete(m.activeByID, id)
+	if entry.dbID > 0 {
+		delete(m.activeByDB, entry.dbID)
+	}
+}
+
+func (m *Manager) bindActiveDBID(id string, dbID int64) {
+	if dbID <= 0 {
+		return
+	}
+	m.activeMu.Lock()
+	defer m.activeMu.Unlock()
+	entry, ok := m.activeByID[id]
+	if !ok {
+		return
+	}
+	entry.dbID = dbID
+	m.activeByDB[dbID] = entry
+}
+
+func (m *Manager) requestStopByDBID(dbID int64, desired State) bool {
+	m.activeMu.Lock()
+	entry, ok := m.activeByDB[dbID]
+	if ok {
+		m.stopIntents[entry.id] = desired
+	}
+	m.activeMu.Unlock()
+	if !ok || entry.cancel == nil {
+		return false
+	}
+	entry.cancel()
+	return true
+}
+
+func (m *Manager) consumeStopIntent(id string) (State, bool) {
+	m.activeMu.Lock()
+	defer m.activeMu.Unlock()
+	state, ok := m.stopIntents[id]
+	if !ok {
+		return "", false
+	}
+	delete(m.stopIntents, id)
+	return state, true
+}
+
+func (m *Manager) cleanupCanceledArtifacts(id string) {
+	item := m.registry.Get(id)
+	filename := ""
+	if item != nil {
+		filename = item.Filename
+	}
+	tracked := m.trackedArtifacts(id)
+	if err := m.downloader.CleanupArtifacts(id, filename, tracked); err != nil {
+		slog.Debug("cleanup canceled artifacts failed", "id", id, "error", err)
+	}
+	m.clearArtifacts(id)
+}
+
 func (m *Manager) updateFailure(id string, err error) {
 	msg := err.Error()
 	// reduce noise from long command errors, respecting UTF-8 boundaries
@@ -369,6 +748,7 @@ func (m *Manager) setFilename(id, filename string) {
 		// Item might have been removed
 		return
 	}
+	m.recordArtifacts(id, []string{filepath.Join(m.outDir, filename)})
 
 	item := m.registry.Get(id)
 	if item != nil {
@@ -400,6 +780,141 @@ func (m *Manager) setFilename(id, filename string) {
 			}()
 		}
 	}
+}
+
+func (m *Manager) recordArtifacts(id string, paths []string) {
+	if id == "" || len(paths) == 0 {
+		return
+	}
+
+	m.artifactMu.Lock()
+	set, ok := m.artifacts[id]
+	if !ok {
+		set = make(map[string]struct{}, len(paths))
+		m.artifacts[id] = set
+	}
+	for _, path := range paths {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			continue
+		}
+		set[trimmed] = struct{}{}
+	}
+	merged := make([]string, 0, len(set))
+	for path := range set {
+		merged = append(merged, path)
+	}
+	m.artifactMu.Unlock()
+
+	if len(merged) == 0 {
+		return
+	}
+	sort.Strings(merged)
+
+	item := m.registry.Get(id)
+	if item == nil || item.DBID <= 0 || m.store == nil {
+		return
+	}
+
+	dbid := item.DBID
+	idCopy := id
+	m.bgWg.Add(1)
+	go func() {
+		defer m.bgWg.Done()
+		persistLock := m.artifactPersistLock(idCopy)
+		persistLock.Lock()
+		defer persistLock.Unlock()
+
+		pathsCopy := m.trackedArtifacts(idCopy)
+		if len(pathsCopy) == 0 {
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := m.store.UpdateArtifacts(ctx, dbid, pathsCopy); err != nil {
+			if !isExpectedShutdownError(err) {
+				slog.Error("failed to update artifacts in store",
+					"event", "store_update_error",
+					"operation", "update_artifacts",
+					"db_id", dbid,
+					"error", err)
+			}
+		}
+	}()
+}
+
+func (m *Manager) artifactPersistLock(id string) *sync.Mutex {
+	m.artifactPersistMu.Lock()
+	defer m.artifactPersistMu.Unlock()
+	if m.artifactPersistByID == nil {
+		m.artifactPersistByID = make(map[string]*sync.Mutex)
+	}
+	lock, ok := m.artifactPersistByID[id]
+	if !ok {
+		lock = &sync.Mutex{}
+		m.artifactPersistByID[id] = lock
+	}
+	return lock
+}
+
+func (m *Manager) trackedArtifacts(id string) []string {
+	m.artifactMu.Lock()
+	defer m.artifactMu.Unlock()
+	set, ok := m.artifacts[id]
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for path := range set {
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (m *Manager) clearArtifacts(id string) {
+	if id == "" {
+		return
+	}
+	m.artifactMu.Lock()
+	delete(m.artifacts, id)
+	m.artifactMu.Unlock()
+
+	m.artifactPersistMu.Lock()
+	delete(m.artifactPersistByID, id)
+	m.artifactPersistMu.Unlock()
+}
+
+func (m *Manager) persistAndClearArtifacts(id string) {
+	if id == "" {
+		return
+	}
+
+	persistLock := m.artifactPersistLock(id)
+	persistLock.Lock()
+	defer persistLock.Unlock()
+
+	if m.store != nil {
+		item := m.registry.Get(id)
+		if item != nil && item.DBID > 0 {
+			paths := m.trackedArtifacts(id)
+			if len(paths) > 0 {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				err := m.store.UpdateArtifacts(ctx, item.DBID, paths)
+				cancel()
+				if err != nil && !isExpectedShutdownError(err) {
+					slog.Error("failed to update artifacts in store",
+						"event", "store_update_error",
+						"operation", "update_artifacts",
+						"db_id", item.DBID,
+						"error", err)
+				}
+			}
+		}
+	}
+
+	m.clearArtifacts(id)
 }
 
 // ProcessPendingDownload processes a single pending download from the database.
@@ -517,6 +1032,9 @@ func truncateUTF8(s string, n int) string {
 func isExpectedShutdownError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
 	}
 	// These are system-level errors from database/sql and context packages
 	// that don't expose typed errors, so string checking is necessary here

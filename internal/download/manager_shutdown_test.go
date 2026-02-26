@@ -64,6 +64,10 @@ func (s *recordingStore) UpdateFilename(ctx context.Context, id int64, filename 
 	return nil
 }
 
+func (s *recordingStore) UpdateArtifacts(ctx context.Context, id int64, paths []string) error {
+	return nil
+}
+
 func TestUpdateState_PersistsDuringClosing(t *testing.T) {
 	st := &recordingStore{}
 	m := &Manager{

@@ -54,7 +54,7 @@ Request:
 Response:
 
 ```json
-{ "status": "success|error", "message": "string", "id": "string", "db_id": 123 }
+{ "status": "success|error", "message": "enqueued|already_exists", "db_id": 123, "existing_id": 123, "existing_status": "pending|downloading|paused|completed|error|canceled" }
 ```
 
 ### POST `/api/download`
@@ -101,7 +101,7 @@ Response:
 
 Lists persisted downloads from SQLite database with filtering and sorting.
 
-Query params: `status=pending|downloading|completed|error`, `sort=created_at|title|status`, `order=asc|desc`.
+Query params: `status=pending|downloading|paused|completed|error|canceled`, `sort=created_at|title|status`, `order=asc|desc`, `limit=<n>`, `offset=<n>`.
 
 Response:
 
@@ -118,6 +118,7 @@ Response:
       "status": "downloading",
       "progress": 42.0,
       "filename": "optional",
+      "artifact_paths": ["optional absolute/relative tracked file paths"],
       "error_message": "optional",
       "created_at": "...",
       "updated_at": "..."
@@ -125,6 +126,68 @@ Response:
   ]
 }
 ```
+
+### DELETE `/api/remove`
+
+Remove a download row from history only (does not delete output files).
+
+Request:
+```json
+{ "id": 123 }
+```
+
+### DELETE `/api/delete`
+
+Delete a completed download's output file(s) and remove its history row.
+
+Request:
+```json
+{ "id": 123 }
+```
+
+Notes:
+- Only valid for `completed` rows.
+- If file deletion fails, the row is kept and the endpoint returns `delete_failed`.
+
+### POST `/api/control/pause`
+Pause a queued/downloading item by DB record ID.
+
+Request:
+```json
+{ "id": 123 }
+```
+
+### POST `/api/control/resume`
+Resume a paused/canceled/error item by DB record ID.
+
+Request:
+```json
+{ "id": 123 }
+```
+
+### POST `/api/control/cancel`
+Cancel an in-flight or queued item by DB record ID.
+
+Request:
+```json
+{ "id": 123 }
+```
+
+### POST `/api/control/play`
+Launch the completed file in the server host's default media player.
+
+Request:
+```json
+{ "id": 123 }
+```
+
+### GET `/api/ws/downloads`
+WebSocket stream for realtime download updates. Supports the same list query params as `/api/downloads` (for example `limit`, `offset`, `status`).
+
+Event types:
+- `snapshot`: full list on connect
+- `diff`: incremental changes with `upserts` and `deletes` (coalesced over a short server window to reduce chatter)
+- `heartbeat`: keepalive frame
 
 ### GET `/healthz`
 
@@ -136,6 +199,7 @@ Health check endpoint; returns `ok`.
 - `invalid_url`: URL is missing or not http/https
 - `yt_dlp_not_found`: `yt-dlp` not installed or missing `--progress-template`
 - `queue_full`: server queue is full; retry later
+- `invalid_state`: action is not valid for current row status
 - `shutting_down`: server is draining; try again later
 - `internal_error`: unexpected server error
 
@@ -185,6 +249,28 @@ Health check endpoint; returns `ok`.
 - Includes embedded subtitles, metadata, thumbnails, and chapters
 - Progress updates in real-time from 0-100%
 - Automatic fallbacks for metadata extraction failures
+
+## Chrome Extension (MV3 Sidepanel)
+
+A React + Tailwind extension lives in `./webext` and provides:
+- Sidepanel queue with realtime WebSocket updates (poll fallback)
+- URL enqueue from sidepanel
+- Toolbar-click enqueue for the current tab URL
+- Keyboard shortcut to open side panel (default: `Alt+Z`)
+- Keyboard shortcut to enqueue current page URL (default: `Alt+X`)
+- Context-menu enqueue (link/media/page URL)
+- Pause/resume/cancel/play/remove/delete actions
+- Optional desktop notifications (completed/error/canceled)
+
+Build steps:
+
+```bash
+cd webext
+bun install
+bun run build
+```
+
+Then load `webext/dist` as an unpacked extension in Chrome (`chrome://extensions`).
 
 ### Graceful Shutdown
 
