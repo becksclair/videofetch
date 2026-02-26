@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "VideoFetch Sidepanel",
+  "description": "Control VideoFetch downloads with realtime progress, pause/resume/cancel, and native play.",
+  "version": "0.1.0",
+  "icons": {
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "VideoFetch"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "commands": {
+    "videofetch_open_sidepanel": {
+      "suggested_key": {
+        "default": "Alt+Z",
+        "mac": "Alt+Z"
+      },
+      "description": "Open VideoFetch side panel"
+    },
+    "videofetch_enqueue_current_page": {
+      "suggested_key": {
+        "default": "Alt+X",
+        "mac": "Alt+X"
+      },
+      "description": "Enqueue current page URL"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "options_page": "options.html",
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "contextMenus",
+    "notifications",
+    "alarms",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ]
+}
