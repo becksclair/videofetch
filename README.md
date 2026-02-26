@@ -28,12 +28,14 @@ go build -o videofetch ./cmd/videofetch
   - Windows: `%APPDATA%/videofetch/videofetch.db`
   - Linux/macOS: `$HOME/.cache/videofetch/videofetch.db`
 - `--log-level` (default: `info`): Log level for structured JSON logging (`debug`, `info`, `warn`, `error`)
+- `--unsafe-log-payloads` (default: `false`): allow raw API payload dumps in debug logs (unsafe; may expose secrets)
 
 Notes:
 
 - The database is always enabled; omitting `--db` uses the default path above.
 - Rate limiting: 60 requests/minute per client IP.
 - Logging outputs structured JSON to stdout, suitable for aggregation systems (ELK, CloudWatch, etc.)
+- URL fields in logs are redacted by default (userinfo stripped, query values masked).
 
 ## API
 
@@ -115,6 +117,8 @@ Response:
       "thumbnail_url": "...",
       "status": "downloading",
       "progress": 42.0,
+      "filename": "optional",
+      "error_message": "optional",
       "created_at": "...",
       "updated_at": "..."
     }
