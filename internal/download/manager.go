@@ -25,6 +25,10 @@ const (
 	StateFailed      State = "failed"
 )
 
+const pendingMetadataTimeout = 30 * time.Second
+
+var fetchMediaInfo = FetchMediaInfo
+
 // progressData represents the JSON structure from yt-dlp's progress output
 type progressData struct {
 	Status             string  `json:"status"`
@@ -71,6 +75,9 @@ type Manager struct {
 	wg      sync.WaitGroup
 	closing atomic.Bool
 
+	runCtx    context.Context
+	runCancel context.CancelFunc
+
 	// ensure Shutdown is safe to call multiple times
 	shutdownOnce sync.Once
 
@@ -82,6 +89,8 @@ type Manager struct {
 	downloader *Downloader
 
 	store Store
+
+	workerDownload func(ctx context.Context, id, url string) error
 }
 
 // Store interface defines methods for persisting download state
@@ -93,6 +102,7 @@ type Store interface {
 
 // PendingDownloadStore defines methods needed to process pending downloads from the database
 type PendingDownloadStore interface {
+	TryClaimPending(ctx context.Context, id int64) (bool, error)
 	UpdateStatus(ctx context.Context, id int64, status string, errMsg string) error
 	UpdateMeta(ctx context.Context, id int64, title string, duration int64, thumbnail string) error
 }
@@ -111,6 +121,7 @@ func NewManager(outputDir string, workers, queueCap int) *Manager {
 		registry:   NewItemRegistry(queueCap * 2),
 		downloader: NewDownloader(outputDir),
 	}
+	m.runCtx, m.runCancel = context.WithCancel(context.Background())
 
 	// Set up downloader callbacks
 	m.downloader.SetProgressCallback(m.updateProgress)
@@ -151,6 +162,9 @@ func (m *Manager) StopAccepting() {
 func (m *Manager) Shutdown() {
 	// Mark manager as closing to stop new enqueues
 	m.closing.Store(true)
+	if m.runCancel != nil {
+		m.runCancel()
+	}
 	// Close the jobs channel exactly once
 	m.shutdownOnce.Do(func() {
 		close(m.jobs)
@@ -211,9 +225,16 @@ func (m *Manager) worker(idx int) {
 	for j := range m.jobs {
 		m.updateState(j.id, StateDownloading, "")
 
-		// Use context for potential cancellation
-		ctx := context.Background()
-		if err := m.downloader.Download(ctx, j.id, j.url); err != nil {
+		ctx := m.runCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		downloadFn := m.workerDownload
+		if downloadFn == nil {
+			downloadFn = m.downloader.Download
+		}
+
+		if err := downloadFn(ctx, j.id, j.url); err != nil {
 			m.updateFailure(j.id, err)
 		} else {
 			m.updateProgress(j.id, 100)
@@ -270,10 +291,6 @@ func (m *Manager) updateProgress(id string, p float64) {
 				m.bgWg.Add(1)
 				go func() {
 					defer m.bgWg.Done()
-					// Skip if shutting down
-					if m.closing.Load() {
-						return
-					}
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
 					if err := m.store.UpdateProgress(ctx, dbid, prog); err != nil {
@@ -321,10 +338,6 @@ func (m *Manager) updateState(id string, st State, errMsg string) {
 			m.bgWg.Add(1)
 			go func() {
 				defer m.bgWg.Done()
-				// Skip if shutting down
-				if m.closing.Load() {
-					return
-				}
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				if err := m.store.UpdateStatus(ctx, dbid, statusStr, errMsg); err != nil {
@@ -371,10 +384,6 @@ func (m *Manager) setFilename(id, filename string) {
 			m.bgWg.Add(1)
 			go func() {
 				defer m.bgWg.Done()
-				// Skip if shutting down
-				if m.closing.Load() {
-					return
-				}
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				if err := m.store.UpdateFilename(ctx, dbid, fname); err != nil {
@@ -393,16 +402,28 @@ func (m *Manager) setFilename(id, filename string) {
 	}
 }
 
-// ProcessPendingDownload processes a single pending download from the database
-// This replaces the DBWorker polling pattern by being called directly from HTTP handlers
+// ProcessPendingDownload processes a single pending download from the database.
 func (m *Manager) ProcessPendingDownload(ctx context.Context, dbID int64, url string, store PendingDownloadStore) error {
-	// Update status to downloading to prevent duplicate processing
-	if err := store.UpdateStatus(ctx, dbID, "downloading", ""); err != nil {
-		return fmt.Errorf("failed to update status for download %d: %w", dbID, err)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	claimed, err := store.TryClaimPending(ctx, dbID)
+	if err != nil {
+		return fmt.Errorf("failed to claim pending download %d: %w", dbID, err)
+	}
+	if !claimed {
+		slog.Debug("pending download already claimed",
+			"event", "pending_claim_conflict",
+			"db_id", dbID,
+			"url", logging.RedactURL(url))
+		return nil
 	}
 
 	// Fetch media info
-	mediaInfo, err := FetchMediaInfo(url)
+	metaCtx, metaCancel := context.WithTimeout(ctx, pendingMetadataTimeout)
+	defer metaCancel()
+	mediaInfo, err := fetchMediaInfo(metaCtx, url)
 	if err != nil {
 		logging.LogMetadataFetch(url, dbID, err)
 		// Update database with error
@@ -433,7 +454,7 @@ func (m *Manager) ProcessPendingDownload(ctx context.Context, dbID int64, url st
 		slog.Error("failed to enqueue download in ProcessPendingDownload",
 			"event", "enqueue_error",
 			"db_id", dbID,
-			"url", url,
+			"url", logging.RedactURL(url),
 			"error", err)
 		// Update database with error
 		if updateErr := store.UpdateStatus(ctx, dbID, "failed", fmt.Sprintf("enqueue_failed: %v", err)); updateErr != nil {
@@ -452,7 +473,7 @@ func (m *Manager) ProcessPendingDownload(ctx context.Context, dbID int64, url st
 
 	slog.Info("ProcessPendingDownload: download enqueued",
 		"event", "download_enqueued",
-		"url", url,
+		"url", logging.RedactURL(url),
 		"db_id", dbID,
 		"manager_id", id)
 	return nil

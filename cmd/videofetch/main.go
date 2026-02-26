@@ -31,6 +31,7 @@ func main() {
 	flag.IntVar(&cfg.QueueCap, "queue", cfg.QueueCap, "Download queue capacity")
 	flag.StringVar(&cfg.DBPath, "db", "", "Path to SQLite database (default: OS cache dir: videofetch/videofetch.db)")
 	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: debug, info, warn, error")
+	flag.BoolVar(&cfg.UnsafeLogPayloads, "unsafe-log-payloads", cfg.UnsafeLogPayloads, "Enable unsafe raw API payload logging (may leak secrets)")
 	flag.Parse()
 
 	// Validate configuration
@@ -95,7 +96,9 @@ func main() {
 	defer dbWorker.Stop()
 
 	// Create HTTP server
-	mux := server.New(mgr, st, cfg.AbsOutputDir)
+	mux := server.New(mgr, st, cfg.AbsOutputDir, server.Options{
+		UnsafeLogPayloads: cfg.UnsafeLogPayloads,
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

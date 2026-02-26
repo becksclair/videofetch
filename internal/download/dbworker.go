@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+	"videofetch/internal/logging"
 )
 
 // DBStore interface for the store operations needed by DBWorker
@@ -19,6 +20,7 @@ type DBStore interface {
 		GetStatus() string
 		GetProgress() float64
 	}, error)
+	TryClaimPending(ctx context.Context, id int64) (bool, error)
 	UpdateStatus(ctx context.Context, id int64, status string, errMsg string) error
 	UpdateMeta(ctx context.Context, id int64, title string, duration int64, thumbnail string) error
 }
@@ -113,7 +115,7 @@ func (dw *DBWorker) processDownload(download map[string]interface{}) {
 		slog.Error("dbworker: ProcessPendingDownload failed",
 			"event", "dbworker_process_error",
 			"db_id", downloadID,
-			"url", downloadURL,
+			"url", logging.RedactURL(downloadURL),
 			"error", err)
 		// Mark as failed to prevent infinite retries
 		if updateErr := dw.store.UpdateStatus(dw.ctx, downloadID, "failed", fmt.Sprintf("ProcessPendingDownload failed: %v", err)); updateErr != nil {
@@ -162,7 +164,7 @@ func (dw *DBWorker) RetryIncompleteDownloads() error {
 		slog.Info("dbworker: reset download to pending for retry",
 			"event", "dbworker_reset",
 			"db_id", download.GetID(),
-			"url", download.GetURL(),
+			"url", logging.RedactURL(download.GetURL()),
 			"status", download.GetStatus(),
 			"progress", download.GetProgress())
 	}

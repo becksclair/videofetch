@@ -3,7 +3,9 @@ package logging
 import (
 	"context"
 	"log/slog"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -50,6 +52,32 @@ func ParseLevel(level string) slog.Level {
 
 // Helper functions for common logging patterns
 
+// RedactURL removes secrets from URL logs while retaining debugging value.
+// It strips userinfo and masks query parameter values.
+func RedactURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed == nil {
+		return rawURL
+	}
+
+	parsed.User = nil
+
+	if parsed.RawQuery != "" {
+		query := parsed.Query()
+		for key := range query {
+			query.Set(key, "***")
+		}
+		parsed.RawQuery = query.Encode()
+	}
+
+	return parsed.String()
+}
+
 // LogDownloadStart logs the start of a download
 func LogDownloadStart(downloadID, dbID string, url string) {
 	if Logger == nil {
@@ -59,7 +87,7 @@ func LogDownloadStart(downloadID, dbID string, url string) {
 		"event", "download_start",
 		"download_id", downloadID,
 		"db_id", dbID,
-		"url", url)
+		"url", RedactURL(url))
 }
 
 // LogDownloadProgress logs download progress updates
@@ -72,7 +100,7 @@ func LogDownloadProgress(downloadID, dbID string, progress float64, url string) 
 		"download_id", downloadID,
 		"db_id", dbID,
 		"progress", progress,
-		"url", url)
+		"url", RedactURL(url))
 }
 
 // LogDownloadComplete logs successful download completion
@@ -107,7 +135,7 @@ func LogDownloadStateChange(downloadID string, url string, state string) {
 	Logger.Info("download state changed",
 		"event", "download_state_change",
 		"download_id", downloadID,
-		"url", url,
+		"url", RedactURL(url),
 		"state", state)
 }
 
@@ -138,7 +166,7 @@ func LogDBCreate(id int64, url, title string, duration int, status string, progr
 	Logger.Info("database record created",
 		"event", "db_create",
 		"id", id,
-		"url", url,
+		"url", RedactURL(url),
 		"title", title,
 		"duration", duration,
 		"status", status,
@@ -156,13 +184,18 @@ func LogDBUpdate(operation string, id int64, fields map[string]any) {
 		"id", id,
 	}
 	for k, v := range fields {
+		if strings.EqualFold(k, "url") {
+			if urlValue, ok := v.(string); ok {
+				v = RedactURL(urlValue)
+			}
+		}
 		attrs = append(attrs, k, v)
 	}
 	Logger.Info("database updated", attrs...)
 }
 
 // LogHTTPRequest logs HTTP request handling
-func LogHTTPRequest(method, path, remoteAddr string, duration time.Duration, status int) {
+func LogHTTPRequest(method, path, remoteAddr string, duration time.Duration, status int, responseBytes int) {
 	if Logger == nil {
 		return
 	}
@@ -172,7 +205,8 @@ func LogHTTPRequest(method, path, remoteAddr string, duration time.Duration, sta
 		"path", path,
 		"remote_addr", remoteAddr,
 		"duration_ms", duration.Milliseconds(),
-		"status", status)
+		"status", status,
+		"response_bytes", responseBytes)
 }
 
 // LogServerStart logs server startup
@@ -229,13 +263,13 @@ func LogMetadataFetch(url string, dbID int64, err error) {
 	if err != nil {
 		Logger.Error("metadata fetch failed",
 			"event", "metadata_fetch_error",
-			"url", url,
+			"url", RedactURL(url),
 			"db_id", dbID,
 			"error", err)
 	} else {
 		Logger.Info("metadata fetched",
 			"event", "metadata_fetch",
-			"url", url,
+			"url", RedactURL(url),
 			"db_id", dbID)
 	}
 }
@@ -249,13 +283,13 @@ func LogYTDLPCommand(id, url, output string, success bool) {
 		Logger.Info("yt-dlp command success",
 			"event", "ytdlp_success",
 			"download_id", id,
-			"url", url,
+			"url", RedactURL(url),
 			"output", output)
 	} else {
 		Logger.Info("yt-dlp command started",
 			"event", "ytdlp_start",
 			"download_id", id,
-			"url", url,
+			"url", RedactURL(url),
 			"output", output)
 	}
 }

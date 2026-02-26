@@ -2,6 +2,7 @@ package download
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -18,7 +19,13 @@ type MediaInfo struct {
 
 // FetchMediaInfo runs `yt-dlp -j` and returns the first parsed media info.
 // On failure, returns a zero MediaInfo and an error.
-func FetchMediaInfo(inputURL string) (MediaInfo, error) {
+func FetchMediaInfo(ctx context.Context, inputURL string) (MediaInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return MediaInfo{}, err
+	}
 	if err := CheckYTDLP(); err != nil {
 		return MediaInfo{}, err
 	}
@@ -28,7 +35,7 @@ func FetchMediaInfo(inputURL string) (MediaInfo, error) {
 	}
 	// Mirror the Rust example: use -j and pass extractor args to impersonate
 	// the generic extractor when probing metadata to improve robustness.
-	cmd := exec.Command("yt-dlp", "-j", "--extractor-args", "generic:impersonate", "--no-playlist", inputURL)
+	cmd := exec.CommandContext(ctx, "yt-dlp", "-j", "--extractor-args", "generic:impersonate", "--no-playlist", inputURL)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return MediaInfo{}, err

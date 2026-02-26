@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ type Download struct {
 	Status       string    `json:"status"`
 	Progress     float64   `json:"progress"`
 	Filename     string    `json:"filename"`
+	ErrorMessage string    `json:"error_message,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -69,6 +71,7 @@ CREATE TABLE IF NOT EXISTS downloads (
     status TEXT,
     progress REAL,
     filename TEXT,
+    error_message TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -81,14 +84,53 @@ CREATE INDEX IF NOT EXISTS idx_downloads_url_status ON downloads(url, status);
 		return err
 	}
 
-	// Add filename column if it doesn't exist (migration for existing DBs)
-	_, err = db.Exec(`ALTER TABLE downloads ADD COLUMN filename TEXT`)
-	// TODO: Replace string-based SQLite error checking with proper error types when available
-	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+	if err := ensureColumn(db, "downloads", "filename", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "downloads", "error_message", "TEXT"); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func ensureColumn(db *sql.DB, table, column, colType string) error {
+	hasCol, err := hasColumn(db, table, column)
+	if err != nil {
+		return err
+	}
+	if hasCol {
+		return nil
+	}
+
+	_, err = db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, colType))
+	return err
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			colType   string
+			notNull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if strings.EqualFold(name, column) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // Close closes the underlying DB.
@@ -128,13 +170,23 @@ func (s *Store) UpdateProgress(ctx context.Context, id int64, progress float64) 
 // UpdateStatus sets status (and optionally title/thumbnail if provided) and bumps updated_at.
 func (s *Store) UpdateStatus(ctx context.Context, id int64, status string, errMsg string) error {
 	st := normalizeStatus(status)
-	_, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, st, id)
+	var err error
+	if st == "error" {
+		trimmedErr := strings.TrimSpace(errMsg)
+		if trimmedErr == "" {
+			_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, st, id)
+		} else {
+			_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, st, trimmedErr, id)
+		}
+	} else {
+		_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, st, id)
+	}
 	if err != nil {
 		return err
 	}
 	fields := map[string]any{"status": st}
 	if errMsg != "" {
-		fields["error"] = errMsg
+		fields["error_message"] = errMsg
 	}
 	logging.LogDBUpdate("update_status", id, fields)
 	return nil
@@ -176,6 +228,20 @@ func (s *Store) UpdateMeta(ctx context.Context, id int64, title string, duration
 	return nil
 }
 
+// TryClaimPending atomically transitions a pending download to downloading.
+// Returns true when claim succeeds, false when the row was not pending.
+func (s *Store) TryClaimPending(ctx context.Context, id int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'downloading', error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'`, id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
 // ListDownloads returns downloads filtered and sorted.
 type ListFilter struct {
 	Status string // optional: pending|downloading|completed|error
@@ -201,7 +267,7 @@ func (s *Store) ListDownloads(ctx context.Context, f ListFilter) ([]Download, er
 	}
 	var args []any
 	sb := strings.Builder{}
-	sb.WriteString("SELECT id, url, title, duration, thumbnail_url, status, progress, filename, created_at, updated_at FROM downloads")
+	sb.WriteString("SELECT id, url, title, duration, thumbnail_url, status, progress, filename, error_message, created_at, updated_at FROM downloads")
 	if f.Status != "" {
 		sb.WriteString(" WHERE status = ?")
 		args = append(args, normalizeStatus(f.Status))
@@ -227,13 +293,37 @@ func (s *Store) ListDownloads(ctx context.Context, f ListFilter) ([]Download, er
 	for rows.Next() {
 		var d Download
 		var filename sql.NullString
-		if err := rows.Scan(&d.ID, &d.URL, &d.Title, &d.Duration, &d.ThumbnailURL, &d.Status, &d.Progress, &filename, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		var errorMessage sql.NullString
+		if err := rows.Scan(&d.ID, &d.URL, &d.Title, &d.Duration, &d.ThumbnailURL, &d.Status, &d.Progress, &filename, &errorMessage, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, err
 		}
 		d.Filename = filename.String
+		d.ErrorMessage = errorMessage.String
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// GetDownloadByID returns a single download by ID.
+func (s *Store) GetDownloadByID(ctx context.Context, id int64) (Download, bool, error) {
+	var d Download
+	var filename sql.NullString
+	var errorMessage sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, url, title, duration, thumbnail_url, status, progress, filename, error_message, created_at, updated_at
+FROM downloads
+WHERE id = ?`, id).Scan(
+		&d.ID, &d.URL, &d.Title, &d.Duration, &d.ThumbnailURL, &d.Status, &d.Progress, &filename, &errorMessage, &d.CreatedAt, &d.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Download{}, false, nil
+	}
+	if err != nil {
+		return Download{}, false, err
+	}
+	d.Filename = filename.String
+	d.ErrorMessage = errorMessage.String
+	return d, true, nil
 }
 
 // UpdateFilename sets the filename when download is complete.
@@ -274,7 +364,7 @@ func (s *Store) GetPendingDownloads(ctx context.Context, limit int) ([]Download,
 	if limit <= 0 {
 		limit = 10
 	}
-	query := `SELECT id, url, title, duration, thumbnail_url, status, progress, filename, created_at, updated_at 
+	query := `SELECT id, url, title, duration, thumbnail_url, status, progress, filename, error_message, created_at, updated_at
 			  FROM downloads 
 			  WHERE status = 'pending' 
 			  ORDER BY created_at ASC 
@@ -290,13 +380,17 @@ func (s *Store) GetPendingDownloads(ctx context.Context, limit int) ([]Download,
 	for rows.Next() {
 		var d Download
 		var filename sql.NullString
+		var errorMessage sql.NullString
 		err := rows.Scan(&d.ID, &d.URL, &d.Title, &d.Duration, &d.ThumbnailURL,
-			&d.Status, &d.Progress, &filename, &d.CreatedAt, &d.UpdatedAt)
+			&d.Status, &d.Progress, &filename, &errorMessage, &d.CreatedAt, &d.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
 		if filename.Valid {
 			d.Filename = filename.String
+		}
+		if errorMessage.Valid {
+			d.ErrorMessage = errorMessage.String
 		}
 		downloads = append(downloads, d)
 	}
@@ -316,7 +410,7 @@ func (s *Store) GetIncompleteDownloads(ctx context.Context, limit int) ([]interf
 	if limit <= 0 {
 		limit = 50 // reasonable default for startup retry
 	}
-	query := `SELECT id, url, title, duration, thumbnail_url, status, progress, filename, created_at, updated_at 
+	query := `SELECT id, url, title, duration, thumbnail_url, status, progress, filename, error_message, created_at, updated_at
 			  FROM downloads 
 			  WHERE status != 'completed' OR progress < 100
 			  ORDER BY created_at ASC 
@@ -340,13 +434,17 @@ func (s *Store) GetIncompleteDownloads(ctx context.Context, limit int) ([]interf
 	for rows.Next() {
 		var d Download
 		var filename sql.NullString
+		var errorMessage sql.NullString
 		err := rows.Scan(&d.ID, &d.URL, &d.Title, &d.Duration, &d.ThumbnailURL,
-			&d.Status, &d.Progress, &filename, &d.CreatedAt, &d.UpdatedAt)
+			&d.Status, &d.Progress, &filename, &errorMessage, &d.CreatedAt, &d.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
 		if filename.Valid {
 			d.Filename = filename.String
+		}
+		if errorMessage.Valid {
+			d.ErrorMessage = errorMessage.String
 		}
 		downloads = append(downloads, &d)
 	}
@@ -387,7 +485,7 @@ func (s *Store) CountDownloadsByStatus(ctx context.Context, status string) (int6
 
 // RetryFailedDownloads resets all failed downloads back to pending status for retry
 func (s *Store) RetryFailedDownloads(ctx context.Context) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'pending', progress = 0, updated_at = CURRENT_TIMESTAMP WHERE status = 'error'`)
+	result, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'pending', progress = 0, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE status = 'error'`)
 	if err != nil {
 		return 0, err
 	}

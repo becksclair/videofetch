@@ -27,7 +27,8 @@ type Config struct {
 	QueueCap int // max pending jobs
 
 	// Logging
-	LogLevel string // debug|info|warn|error
+	LogLevel          string // debug|info|warn|error
+	UnsafeLogPayloads bool
 
 	// Validation & computed
 	Version   string    // app version
@@ -175,6 +176,7 @@ func (c *Config) String() string {
     QueueCap: %d
   Logging:
     LogLevel: %s
+    UnsafeLogPayloads: %t
   Meta:
     Version: %s
     StartTime: %s
@@ -182,20 +184,21 @@ func (c *Config) String() string {
 		c.OutputDir, c.AbsOutputDir,
 		c.DBPath, c.AbsDBPath,
 		c.Workers, c.QueueCap,
-		c.LogLevel,
+		c.LogLevel, c.UnsafeLogPayloads,
 		c.Version, c.StartTime.Format(time.RFC3339))
 }
 
 // Summary returns a one-line summary of key configuration
 func (c *Config) Summary() map[string]any {
 	return map[string]any{
-		"addr":       c.Addr,
-		"output_dir": c.AbsOutputDir,
-		"db_path":    c.AbsDBPath,
-		"workers":    c.Workers,
-		"queue":      c.QueueCap,
-		"log_level":  c.LogLevel,
-		"version":    c.Version,
+		"addr":                c.Addr,
+		"output_dir":          c.AbsOutputDir,
+		"db_path":             c.AbsDBPath,
+		"workers":             c.Workers,
+		"queue":               c.QueueCap,
+		"log_level":           c.LogLevel,
+		"unsafe_log_payloads": c.UnsafeLogPayloads,
+		"version":             c.Version,
 	}
 }
 

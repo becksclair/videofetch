@@ -27,9 +27,18 @@ type downloadManager interface {
 	SetMeta(id string, title string, duration int64, thumb string)
 }
 
+type Options struct {
+	UnsafeLogPayloads bool
+}
+
 // New returns an http.Handler with routes and middleware wired.
 // Minimal interface to abstract the store; nil store disables DB-backed features.
-func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
+func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options) http.Handler {
+	serverOpts := Options{}
+	if len(opts) > 0 {
+		serverOpts = opts[0]
+	}
+
 	mux := http.NewServeMux()
 	// helpers
 	var storeCreate func(ctx context.Context, url, title string, duration int64, thumbnail string, status string, progress float64) (int64, error)
@@ -69,23 +78,10 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 			// Fast insertion: store as pending with URL as title, no metadata fetching
 			if idv, err := storeCreate(r.Context(), req.URL, req.URL, 0, "", "pending", 0); err == nil {
 				dbid = idv
-
-				// Process download asynchronously (fetches metadata, then enqueues)
-				if manager, ok := mgr.(*download.Manager); ok && st != nil {
-					go func(dbID int64, url string) {
-						ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-						defer cancel()
-						if err := manager.ProcessPendingDownload(ctx, dbID, url, st); err != nil {
-							slog.Error("ProcessPendingDownload failed",
-								"event", "process_download_error",
-								"db_id", dbID,
-								"url", url,
-								"error", err)
-						}
-					}(dbid, req.URL)
-				}
 			} else {
 				logging.LogDBOperation("create_download", 0, err)
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
 			}
 		}
 
@@ -112,6 +108,7 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		dbIDs := make([]int64, 0, len(req.URLs))
 		validURLCount := 0
 		duplicateCount := 0
+		createFailureCount := 0
 
 		for _, u := range req.URLs {
 			if !validURL(u) {
@@ -132,43 +129,15 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				if idv, err := storeCreate(r.Context(), u, u, 0, "", "pending", 0); err == nil {
 					dbid = idv
 					dbIDs = append(dbIDs, dbid)
-
-					// Immediately process in background goroutine instead of waiting for DBWorker
-					if manager, ok := mgr.(*download.Manager); ok && st != nil {
-						go func(dbID int64, url string) {
-							ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-							defer cancel()
-							if err := manager.ProcessPendingDownload(ctx, dbID, url, st); err != nil {
-								slog.Error("ProcessPendingDownload failed",
-									"event", "process_download_error",
-									"db_id", dbID,
-									"url", url,
-									"error", err)
-							}
-						}(dbid, u)
-					}
 				} else {
 					logging.LogDBOperation("create_download", 0, err)
+					createFailureCount++
 				}
 			}
 		}
 
-		if validURLCount == 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "no_valid_urls"})
-			return
-		}
-
-		if len(dbIDs) == 0 && duplicateCount > 0 {
-			// All valid URLs were duplicates - return success
-			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "all_already_completed", "duplicates": duplicateCount})
-			return
-		}
-
-		response := map[string]any{"status": "success", "message": "enqueued", "db_ids": dbIDs}
-		if duplicateCount > 0 {
-			response["duplicates_skipped"] = duplicateCount
-		}
-		writeJSON(w, http.StatusOK, response)
+		statusCode, response := buildBatchResponse(validURLCount, dbIDs, duplicateCount, createFailureCount)
+		writeJSON(w, statusCode, response)
 	})
 
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
@@ -233,27 +202,18 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				return
 			}
 
-			// Get download record to find filename
-			items, err := st.ListDownloads(r.Context(), store.ListFilter{})
+			row, found, err := st.GetDownloadByID(r.Context(), id)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
 				return
 			}
-
-			var filename string
-			for _, item := range items {
-				if item.ID == id {
-					filename = item.Filename
-					break
-				}
-			}
-
-			if filename == "" {
+			if !found || row.Filename == "" {
 				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "file_not_found"})
 				return
 			}
 
 			// Check if file exists in output directory
+			filename := row.Filename
 			fullPath := filepath.Join(outputDir, filename)
 			if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "file_not_found"})
@@ -297,14 +257,24 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 				return
 			}
 
-			// Log the JSON response for debugging (only in debug level)
+			// Log response for debugging; raw payload dump requires explicit unsafe opt-in.
 			response := map[string]any{"status": "success", "downloads": items}
 			if slog.Default().Enabled(r.Context(), slog.LevelDebug) {
-				if jsonBytes, err := json.Marshal(response); err == nil {
-					slog.Debug("/api/downloads response",
-						"event", "api_response",
+				if serverOpts.UnsafeLogPayloads {
+					if jsonBytes, err := json.Marshal(response); err == nil {
+						slog.Debug("/api/downloads response (unsafe payload logging enabled)",
+							"event", "api_response_raw",
+							"endpoint", "/api/downloads",
+							"data", string(jsonBytes))
+					}
+				} else {
+					slog.Debug("/api/downloads response summary",
+						"event", "api_response_summary",
 						"endpoint", "/api/downloads",
-						"data", string(jsonBytes))
+						"download_count", len(items),
+						"status_filter", f.Status,
+						"sort", f.Sort,
+						"order", f.Order)
 				}
 			}
 
@@ -385,6 +355,7 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 					ThumbnailURL: d.ThumbnailURL,
 					Progress:     d.Progress,
 					State:        stt,
+					Error:        d.ErrorMessage,
 					Filename:     d.Filename,
 				})
 			}
@@ -472,22 +443,12 @@ func New(mgr downloadManager, st *store.Store, outputDir string) http.Handler {
 		// Create minimal DB record (async pattern - no blocking on metadata)
 		if storeCreate != nil {
 			// Fast insertion: store as pending with URL as title, no metadata fetching
-			if dbid, err := storeCreate(r.Context(), u, u, 0, "", "pending", 0); err == nil {
-				// Process download asynchronously (fetches metadata, then enqueues)
-				if manager, ok := mgr.(*download.Manager); ok && st != nil {
-					go func(dbID int64, url string) {
-						ctx := context.Background()
-						if err := manager.ProcessPendingDownload(ctx, dbID, url, st); err != nil {
-							slog.Error("ProcessPendingDownload failed",
-								"event", "process_download_error",
-								"db_id", dbID,
-								"url", url,
-								"error", err)
-						}
-					}(dbid, u)
-				}
-			} else {
+			if _, err := storeCreate(r.Context(), u, u, 0, "", "pending", 0); err != nil {
 				logging.LogDBOperation("create_download", 0, err)
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`<div class="text-red-600 text-sm">Failed to queue video</div>`))
+				return
 			}
 		}
 
@@ -594,6 +555,38 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func buildBatchResponse(validURLCount int, dbIDs []int64, duplicateCount int, createFailureCount int) (int, map[string]any) {
+	if validURLCount == 0 {
+		return http.StatusBadRequest, map[string]any{"status": "error", "message": "no_valid_urls"}
+	}
+
+	if len(dbIDs) == 0 && duplicateCount > 0 && createFailureCount == 0 {
+		return http.StatusOK, map[string]any{"status": "success", "message": "all_already_completed", "duplicates": duplicateCount}
+	}
+
+	if len(dbIDs) == 0 && createFailureCount > 0 {
+		resp := map[string]any{
+			"status":  "error",
+			"message": "internal_error",
+			"failed":  createFailureCount,
+		}
+		if duplicateCount > 0 {
+			resp["duplicates_skipped"] = duplicateCount
+		}
+		return http.StatusInternalServerError, resp
+	}
+
+	response := map[string]any{"status": "success", "message": "enqueued", "db_ids": dbIDs}
+	if duplicateCount > 0 {
+		response["duplicates_skipped"] = duplicateCount
+	}
+	if createFailureCount > 0 {
+		response["failed"] = createFailureCount
+		response["message"] = "partial_enqueued"
+	}
+	return http.StatusOK, response
+}
+
 func validURL(u string) bool {
 	if len(u) == 0 || len(u) > 2048 { // sanity cap
 		return false
@@ -613,16 +606,40 @@ func validURL(u string) bool {
 
 // Middleware
 
+type responseRecorder struct {
+	http.ResponseWriter
+	statusCode   int
+	bytesWritten int
+}
+
+func newResponseRecorder(w http.ResponseWriter) *responseRecorder {
+	return &responseRecorder{
+		ResponseWriter: w,
+		statusCode:     http.StatusOK,
+	}
+}
+
+func (r *responseRecorder) WriteHeader(code int) {
+	r.statusCode = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *responseRecorder) Write(b []byte) (int, error) {
+	n, err := r.ResponseWriter.Write(b)
+	r.bytesWritten += n
+	return n, err
+}
+
 func logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
+		rec := newResponseRecorder(w)
+		next.ServeHTTP(rec, r)
 		// Skip noisy log line for HTMX row polling endpoint
 		if r.URL.Path == "/dashboard/rows" {
 			return
 		}
-		// TODO: capture response status code properly with a response writer wrapper
-		logging.LogHTTPRequest(r.Method, r.URL.Path, r.RemoteAddr, time.Since(start), 200)
+		logging.LogHTTPRequest(r.Method, r.URL.Path, r.RemoteAddr, time.Since(start), rec.statusCode, rec.bytesWritten)
 	})
 }
 
