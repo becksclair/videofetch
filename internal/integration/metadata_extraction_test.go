@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"testing"
 
 	"videofetch/internal/download"
@@ -37,7 +38,7 @@ func TestMetadataExtraction(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Logf("Testing metadata extraction for: %s", tc.url)
 
-			mediaInfo, err := download.FetchMediaInfo(tc.url)
+			mediaInfo, err := download.FetchMediaInfo(context.Background(), tc.url)
 			if err != nil {
 				if tc.expectTitle {
 					t.Logf("Warning: Failed to extract metadata (this might be due to geo-restrictions): %v", err)

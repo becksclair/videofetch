@@ -68,6 +68,10 @@ func (m *mockStore) UpdateStatus(ctx context.Context, id int64, status string, e
 	return nil
 }
 
+func (m *mockStore) TryClaimPending(ctx context.Context, id int64) (bool, error) {
+	return true, nil
+}
+
 func (m *mockStore) UpdateMeta(ctx context.Context, id int64, title string, duration int64, thumbnail string) error {
 	return nil
 }

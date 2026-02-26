@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"videofetch/internal/download"
+	"videofetch/internal/logging"
 	"videofetch/internal/store"
 )
 
@@ -116,6 +120,29 @@ func TestDownloadSingle_AsyncPattern(t *testing.T) {
 	}
 }
 
+func TestDownloadSingle_CreateFailureReturnsError(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	_ = testStore.Close()
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "unused", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, "/tmp/test")
+
+	w := doJSON(t, h, http.MethodPost, "/api/download_single", "10.0.0.12", map[string]string{"url": "https://example.com/video"})
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp["status"] != "error" || resp["message"] != "internal_error" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
 func TestBatch_Success_Mixed(t *testing.T) {
 	// Note: /api/download now stores to DB and doesn't directly call Enqueue
 	// Without a store, it returns success with empty db_ids
@@ -150,6 +177,46 @@ func TestBatch_NoValidURLs(t *testing.T) {
 	w := doJSON(t, h, http.MethodPost, "/api/download", "10.0.0.7", body)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d", w.Code)
+	}
+}
+
+func TestBatch_AllValidButCreateFails(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	_ = testStore.Close()
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "unused", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, "/tmp/test")
+
+	body := map[string]any{"urls": []string{"https://example.com/a", "https://example.com/b"}}
+	w := doJSON(t, h, http.MethodPost, "/api/download", "10.0.0.13", body)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp["status"] != "error" || resp["message"] != "internal_error" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func TestBuildBatchResponse_DuplicatesAndCreateFailures_NoSuccess(t *testing.T) {
+	code, resp := buildBatchResponse(3, nil, 2, 1)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", code)
+	}
+	if resp["status"] != "error" || resp["message"] != "internal_error" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp["failed"] != 1 {
+		t.Fatalf("expected failed=1, got %+v", resp["failed"])
+	}
+	if resp["duplicates_skipped"] != 2 {
+		t.Fatalf("expected duplicates_skipped=2, got %+v", resp["duplicates_skipped"])
 	}
 }
 
@@ -371,6 +438,279 @@ func TestBatch_DuplicateFiltering(t *testing.T) {
 	// Note: Enqueue is no longer called directly from /api/download,
 	// it's called via ProcessPendingDownload in a goroutine
 	// So we shouldn't expect immediate enqueue calls here
+}
+
+func TestDownloadFile_UsesDirectLookupAndServesFile(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	outputDir := t.TempDir()
+	ctx := context.Background()
+	id, err := testStore.CreateDownload(ctx, "https://example.com/watch?v=abc", "video", 30, "", "completed", 100)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+	if err := testStore.UpdateFilename(ctx, id, "video.mp4"); err != nil {
+		t.Fatalf("UpdateFilename() failed: %v", err)
+	}
+	if err := os.WriteFile(outputDir+"/video.mp4", []byte("ok"), 0o644); err != nil {
+		t.Fatalf("WriteFile() failed: %v", err)
+	}
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, outputDir)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/download_file?id="+fmt.Sprintf("%d", id), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%q", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Header().Get("Content-Disposition"), `filename="video.mp4"`) {
+		t.Fatalf("expected Content-Disposition filename, got %q", w.Header().Get("Content-Disposition"))
+	}
+}
+
+func TestDownloadFile_NotFoundWhenRecordMissing(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, t.TempDir())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/download_file?id=999999", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d body=%q", w.Code, w.Body.String())
+	}
+}
+
+func TestAPIDownloadsDebugSummary_DoesNotLogRawPayloadByDefault(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	ctx := context.Background()
+	_, err := testStore.CreateDownload(ctx, "https://example.com/watch?v=1&token=supersecret", "video", 10, "", "pending", 0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	testLogger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	prevDefault := slog.Default()
+	prevLogger := logging.Logger
+	slog.SetDefault(testLogger)
+	logging.Logger = testLogger
+	defer func() {
+		slog.SetDefault(prevDefault)
+		logging.Logger = prevLogger
+	}()
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, t.TempDir(), Options{UnsafeLogPayloads: false})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/downloads", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	logOut := buf.String()
+	if strings.Contains(logOut, "supersecret") {
+		t.Fatalf("expected no raw payload secrets in logs, got: %s", logOut)
+	}
+	if !strings.Contains(logOut, "\"event\":\"api_response_summary\"") {
+		t.Fatalf("expected api_response_summary debug log, got: %s", logOut)
+	}
+}
+
+func TestAPIDownloadsDebugSummary_UnsafeFlagAllowsRawPayload(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	ctx := context.Background()
+	_, err := testStore.CreateDownload(ctx, "https://example.com/watch?v=1&token=supersecret", "video", 10, "", "pending", 0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	testLogger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	prevDefault := slog.Default()
+	prevLogger := logging.Logger
+	slog.SetDefault(testLogger)
+	logging.Logger = testLogger
+	defer func() {
+		slog.SetDefault(prevDefault)
+		logging.Logger = prevLogger
+	}()
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, t.TempDir(), Options{UnsafeLogPayloads: true})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/downloads", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	logOut := buf.String()
+	if !strings.Contains(logOut, "\"event\":\"api_response_raw\"") {
+		t.Fatalf("expected api_response_raw debug log, got: %s", logOut)
+	}
+	if !strings.Contains(logOut, "supersecret") {
+		t.Fatalf("expected unsafe raw payload to include token in logs when enabled")
+	}
+}
+
+func TestLoggerMiddleware_RecordsRealStatusAndBytes(t *testing.T) {
+	var buf bytes.Buffer
+	testLogger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	prevDefault := slog.Default()
+	prevLogger := logging.Logger
+	slog.SetDefault(testLogger)
+	logging.Logger = testLogger
+	defer func() {
+		slog.SetDefault(prevDefault)
+		logging.Logger = prevLogger
+	}()
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, nil, t.TempDir())
+
+	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 from unknown route, got %d", w.Code)
+	}
+
+	status, bytes, ok := latestHTTPAccessLog(t, buf.String())
+	if !ok {
+		t.Fatalf("expected http_request log entry, got logs: %s", buf.String())
+	}
+	if status != http.StatusNotFound {
+		t.Fatalf("expected logged status 404, got %d", status)
+	}
+	if bytes <= 0 {
+		t.Fatalf("expected positive response_bytes, got %d", bytes)
+	}
+}
+
+func TestDashboardRows_UsesPersistedErrorMessageSnippetAndTooltip(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	longErr := strings.Repeat("x", 130)
+	ctx := context.Background()
+	id, err := testStore.CreateDownload(ctx, "https://example.com/video", "Video", 10, "", "pending", 0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+	if err := testStore.UpdateStatus(ctx, id, "error", longErr); err != nil {
+		t.Fatalf("UpdateStatus() failed: %v", err)
+	}
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, t.TempDir())
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/rows", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	snippet := strings.Repeat("x", 120) + "…"
+	if !strings.Contains(body, snippet) {
+		t.Fatalf("expected truncated error snippet in body")
+	}
+	if !strings.Contains(body, `title="`+longErr+`"`) {
+		t.Fatalf("expected full error in tooltip title, body=%q", body)
+	}
+}
+
+func TestAPIDownloads_IncludesPersistedErrorMessage(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	ctx := context.Background()
+	id, err := testStore.CreateDownload(ctx, "https://example.com/video", "Video", 10, "", "pending", 0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+	if err := testStore.UpdateStatus(ctx, id, "error", "enqueue_failed: boom"); err != nil {
+		t.Fatalf("UpdateStatus() failed: %v", err)
+	}
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, t.TempDir())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/downloads", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Status    string           `json:"status"`
+		Downloads []store.Download `json:"downloads"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json decode failed: %v", err)
+	}
+	if len(resp.Downloads) != 1 {
+		t.Fatalf("expected one download, got %d", len(resp.Downloads))
+	}
+	if resp.Downloads[0].ErrorMessage != "enqueue_failed: boom" {
+		t.Fatalf("expected error_message to be present, got %q", resp.Downloads[0].ErrorMessage)
+	}
+}
+
+func latestHTTPAccessLog(t *testing.T, logs string) (status int, responseBytes int, ok bool) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(logs), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			continue
+		}
+		if row["event"] != "http_request" {
+			continue
+		}
+		statusVal, sOK := row["status"].(float64)
+		bytesVal, bOK := row["response_bytes"].(float64)
+		if !sOK || !bOK {
+			continue
+		}
+		return int(statusVal), int(bytesVal), true
+	}
+	return 0, 0, false
 }
 
 // setupTestServerStore creates an in-memory test store

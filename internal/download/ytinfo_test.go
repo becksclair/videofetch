@@ -1,6 +1,8 @@
 package download
 
 import (
+	"context"
+	"errors"
 	"testing"
 )
 
@@ -196,6 +198,16 @@ func TestTruncateUTF8(t *testing.T) {
 				t.Errorf("truncateUTF8(%q, %d) = %q, expected %q", tt.input, tt.maxBytes, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestFetchMediaInfo_CanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := FetchMediaInfo(ctx, "https://example.com/video")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
 

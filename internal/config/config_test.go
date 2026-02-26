@@ -26,6 +26,9 @@ func TestNew(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Errorf("expected default LogLevel = info, got %s", cfg.LogLevel)
 	}
+	if cfg.UnsafeLogPayloads {
+		t.Errorf("expected default UnsafeLogPayloads = false, got true")
+	}
 }
 
 func TestValidate(t *testing.T) {
@@ -262,17 +265,18 @@ func TestComputeAddr(t *testing.T) {
 
 func TestString(t *testing.T) {
 	cfg := &Config{
-		Host:         "localhost",
-		Port:         8080,
-		Addr:         "localhost:8080",
-		OutputDir:    "~/Videos",
-		AbsOutputDir: "/home/user/Videos",
-		DBPath:       "videofetch.db",
-		AbsDBPath:    "/home/user/.cache/videofetch/videofetch.db",
-		Workers:      4,
-		QueueCap:     128,
-		LogLevel:     "info",
-		Version:      "1.0.0",
+		Host:              "localhost",
+		Port:              8080,
+		Addr:              "localhost:8080",
+		OutputDir:         "~/Videos",
+		AbsOutputDir:      "/home/user/Videos",
+		DBPath:            "videofetch.db",
+		AbsDBPath:         "/home/user/.cache/videofetch/videofetch.db",
+		Workers:           4,
+		QueueCap:          128,
+		LogLevel:          "info",
+		UnsafeLogPayloads: true,
+		Version:           "1.0.0",
 	}
 
 	str := cfg.String()
@@ -285,17 +289,21 @@ func TestString(t *testing.T) {
 	if !strings.Contains(str, "LogLevel: info") {
 		t.Errorf("String() missing log level")
 	}
+	if !strings.Contains(str, "UnsafeLogPayloads: true") {
+		t.Errorf("String() missing unsafe payload logging flag")
+	}
 }
 
 func TestSummary(t *testing.T) {
 	cfg := &Config{
-		Addr:         "localhost:8080",
-		AbsOutputDir: "/home/user/Videos",
-		AbsDBPath:    "/home/user/.cache/videofetch.db",
-		Workers:      4,
-		QueueCap:     128,
-		LogLevel:     "info",
-		Version:      "1.0.0",
+		Addr:              "localhost:8080",
+		AbsOutputDir:      "/home/user/Videos",
+		AbsDBPath:         "/home/user/.cache/videofetch.db",
+		Workers:           4,
+		QueueCap:          128,
+		LogLevel:          "info",
+		UnsafeLogPayloads: true,
+		Version:           "1.0.0",
 	}
 
 	summary := cfg.Summary()
@@ -308,5 +316,8 @@ func TestSummary(t *testing.T) {
 	}
 	if summary["log_level"] != "info" {
 		t.Errorf("Summary() log_level = %v, want info", summary["log_level"])
+	}
+	if summary["unsafe_log_payloads"] != true {
+		t.Errorf("Summary() unsafe_log_payloads = %v, want true", summary["unsafe_log_payloads"])
 	}
 }

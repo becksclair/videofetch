@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -111,6 +112,179 @@ func TestUpdateStatus(t *testing.T) {
 
 	if downloads[0].Status != "downloading" {
 		t.Errorf("Expected status 'downloading', got %s", downloads[0].Status)
+	}
+	if downloads[0].ErrorMessage != "" {
+		t.Errorf("expected empty error_message after non-error status, got %q", downloads[0].ErrorMessage)
+	}
+}
+
+func TestUpdateStatus_PersistErrorAndClear(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	id, err := store.CreateDownload(ctx, "https://example.com/video", "Test Video", 300, "", "pending", 0.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	err = store.UpdateStatus(ctx, id, "error", "metadata_fetch_failed: token=abc123")
+	if err != nil {
+		t.Fatalf("UpdateStatus(error) failed: %v", err)
+	}
+
+	d, found, err := store.GetDownloadByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetDownloadByID() failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected download to exist")
+	}
+	if d.Status != "error" {
+		t.Fatalf("expected status=error, got %s", d.Status)
+	}
+	if d.ErrorMessage == "" {
+		t.Fatalf("expected persisted error message")
+	}
+
+	err = store.UpdateStatus(ctx, id, "completed", "")
+	if err != nil {
+		t.Fatalf("UpdateStatus(completed) failed: %v", err)
+	}
+
+	d, found, err = store.GetDownloadByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetDownloadByID() after clear failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected download to exist after status update")
+	}
+	if d.Status != "completed" {
+		t.Fatalf("expected status=completed, got %s", d.Status)
+	}
+	if d.ErrorMessage != "" {
+		t.Fatalf("expected error_message to clear on non-error status, got %q", d.ErrorMessage)
+	}
+}
+
+func TestGetDownloadByID(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	id, err := store.CreateDownload(ctx, "https://example.com/video", "Test Video", 300, "", "pending", 0.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+	if err := store.UpdateFilename(ctx, id, "video.mp4"); err != nil {
+		t.Fatalf("UpdateFilename() failed: %v", err)
+	}
+	if err := store.UpdateStatus(ctx, id, "error", "download command failed"); err != nil {
+		t.Fatalf("UpdateStatus(error) failed: %v", err)
+	}
+
+	got, found, err := store.GetDownloadByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetDownloadByID(found) failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected found=true")
+	}
+	if got.ID != id {
+		t.Fatalf("expected ID=%d got %d", id, got.ID)
+	}
+	if got.Filename != "video.mp4" {
+		t.Fatalf("expected filename video.mp4 got %q", got.Filename)
+	}
+	if got.ErrorMessage != "download command failed" {
+		t.Fatalf("expected error_message to round-trip, got %q", got.ErrorMessage)
+	}
+
+	_, found, err = store.GetDownloadByID(ctx, id+9999)
+	if err != nil {
+		t.Fatalf("GetDownloadByID(not found) failed: %v", err)
+	}
+	if found {
+		t.Fatalf("expected found=false for missing row")
+	}
+}
+
+func TestOpen_MigratesLegacySchemaWithErrorMessage(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "legacy.db")
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() failed: %v", err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS downloads (
+	id INTEGER PRIMARY KEY,
+	url TEXT NOT NULL,
+	title TEXT,
+	duration INTEGER,
+	thumbnail_url TEXT,
+	status TEXT,
+	progress REAL,
+	filename TEXT,
+	created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+	updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);`)
+	if err != nil {
+		t.Fatalf("creating legacy schema failed: %v", err)
+	}
+	_ = db.Close()
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(legacy DB) failed: %v", err)
+	}
+	defer store.Close()
+
+	hasErrorColumn, err := hasColumn(store.db, "downloads", "error_message")
+	if err != nil {
+		t.Fatalf("hasColumn() failed: %v", err)
+	}
+	if !hasErrorColumn {
+		t.Fatalf("expected migration to add error_message column")
+	}
+}
+
+func TestTryClaimPending(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	id, err := store.CreateDownload(ctx, "https://example.com/video", "Test Video", 300, "", "pending", 0.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	claimed, err := store.TryClaimPending(ctx, id)
+	if err != nil {
+		t.Fatalf("TryClaimPending() failed: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("expected initial claim to succeed")
+	}
+
+	claimedAgain, err := store.TryClaimPending(ctx, id)
+	if err != nil {
+		t.Fatalf("TryClaimPending() second call failed: %v", err)
+	}
+	if claimedAgain {
+		t.Fatalf("expected second claim to fail for non-pending row")
+	}
+
+	downloads, err := store.ListDownloads(ctx, ListFilter{})
+	if err != nil {
+		t.Fatalf("ListDownloads() failed: %v", err)
+	}
+	if len(downloads) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(downloads))
+	}
+	if downloads[0].Status != "downloading" {
+		t.Fatalf("expected status downloading after claim, got %s", downloads[0].Status)
 	}
 }
 

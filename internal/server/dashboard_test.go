@@ -80,6 +80,28 @@ func TestDashboard_Enqueue_OK_And_Invalid(t *testing.T) {
 	}
 }
 
+func TestDashboard_Enqueue_CreateFailure(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	_ = testStore.Close()
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "unused", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, "/tmp/test")
+
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/enqueue", strings.NewReader("url=https%3A%2F%2Fok"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Failed to queue video") {
+		t.Fatalf("expected queue failure message, got %q", w.Body.String())
+	}
+}
+
 // mock manager implementing downloadManager for dashboard tests
 type mockMgr struct {
 	enqueueFn  func(url string) (string, error)
