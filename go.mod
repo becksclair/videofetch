@@ -3,7 +3,7 @@ module videofetch
 go 1.23.0
 
 require (
-	github.com/a-h/templ v0.3.960
+	github.com/a-h/templ v0.3.977
 	modernc.org/sqlite v1.29.10
 )
 
