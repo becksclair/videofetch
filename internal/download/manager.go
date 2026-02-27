@@ -30,7 +30,11 @@ const (
 	StateCanceled    State = "canceled"
 )
 
-const pendingMetadataTimeout = 30 * time.Second
+const (
+	pendingMetadataTimeout     = 30 * time.Second
+	pendingMetadataRetryDelay  = 1500 * time.Millisecond
+	pendingMetadataMaxAttempts = 3
+)
 
 var fetchMediaInfo = FetchMediaInfo
 
@@ -89,9 +93,6 @@ type Manager struct {
 
 	// ensure Shutdown is safe to call multiple times
 	shutdownOnce sync.Once
-
-	// Track background goroutines for progress and status updates
-	bgWg sync.WaitGroup
 
 	// Refactored components
 	registry   *ItemRegistry
@@ -208,8 +209,6 @@ func (m *Manager) Shutdown() {
 	})
 	// Wait for workers to finish current job
 	m.wg.Wait()
-	// Wait for background goroutines (progress and status updates) to complete
-	m.bgWg.Wait()
 }
 
 // Enqueue adds a new URL to the queue and returns the assigned ID.
@@ -295,15 +294,18 @@ func (m *Manager) worker(idx int) {
 				if desired == StateCanceled {
 					m.cleanupCanceledArtifacts(j.id)
 				}
+				m.persistTerminalSnapshot(j.id)
 				continue
 			}
 			m.updateFailure(j.id, err)
+			m.persistTerminalSnapshot(j.id)
 		} else {
 			cancel()
 			m.unregisterActive(j.id)
 			_, _ = m.consumeStopIntent(j.id)
 			m.updateProgress(j.id, 100)
 			m.updateState(j.id, StateCompleted, "")
+			m.persistTerminalSnapshot(j.id)
 			m.persistAndClearArtifacts(j.id)
 		}
 	}
@@ -352,24 +354,7 @@ func (m *Manager) updateProgress(id string, p float64) {
 
 			// Update store if configured
 			if item.DBID > 0 && m.store != nil {
-				dbid := item.DBID
-				prog := new
-				m.bgWg.Add(1)
-				go func() {
-					defer m.bgWg.Done()
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
-					if err := m.store.UpdateProgress(ctx, dbid, prog); err != nil {
-						// Ignore expected errors during shutdown
-						if !isExpectedShutdownError(err) {
-							slog.Error("failed to update progress in store",
-								"event", "store_update_error",
-								"operation", "update_progress",
-								"db_id", dbid,
-								"error", err)
-						}
-					}
-				}()
+				m.persistProgressToStore(item.DBID, new)
 			}
 		}
 	}
@@ -386,42 +371,7 @@ func (m *Manager) updateState(id string, st State, errMsg string) {
 		logging.LogDownloadStateChange(id, item.URL, string(st))
 
 		if item.DBID > 0 && m.store != nil {
-			dbid := item.DBID
-			// Map State to status string
-			var statusStr string
-			switch st {
-			case StateQueued:
-				statusStr = "pending"
-			case StateDownloading:
-				statusStr = "downloading"
-			case StateCompleted:
-				statusStr = "completed"
-			case StateFailed:
-				statusStr = "error"
-			case StatePaused:
-				statusStr = "paused"
-			case StateCanceled:
-				statusStr = "canceled"
-			default:
-				statusStr = "pending"
-			}
-			m.bgWg.Add(1)
-			go func() {
-				defer m.bgWg.Done()
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if err := m.store.UpdateStatus(ctx, dbid, statusStr, errMsg); err != nil {
-					// Ignore expected errors during shutdown
-					if !isExpectedShutdownError(err) {
-						slog.Error("failed to update status in store",
-							"event", "store_update_error",
-							"operation", "update_status",
-							"db_id", dbid,
-							"status", statusStr,
-							"error", err)
-					}
-				}
-			}()
+			m.persistStatusToStore(item.DBID, stateToStatus(st), errMsg)
 		}
 	}
 }
@@ -588,6 +538,25 @@ func (m *Manager) ResumeByDBID(dbID int64) (bool, error) {
 		it.queueToken = prevQueueToken
 	})
 	return false, ErrQueueFull
+}
+
+// IsManagedByDBID reports whether this DB row is currently represented by an
+// active or queued in-memory item managed by this process.
+func (m *Manager) IsManagedByDBID(dbID int64) bool {
+	if dbID <= 0 {
+		return false
+	}
+	m.activeMu.Lock()
+	_, active := m.activeByDB[dbID]
+	m.activeMu.Unlock()
+	if active {
+		return true
+	}
+	item := m.registry.GetWithDBID(dbID)
+	if item == nil {
+		return false
+	}
+	return item.State == StateQueued || item.State == StateDownloading
 }
 
 func (m *Manager) bumpQueueToken(id string) uint64 {
@@ -759,25 +728,7 @@ func (m *Manager) setFilename(id, filename string) {
 		logging.LogDownloadComplete(id, dbIDStr, filename)
 
 		if item.DBID > 0 && m.store != nil {
-			dbid := item.DBID
-			fname := filename
-			m.bgWg.Add(1)
-			go func() {
-				defer m.bgWg.Done()
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if err := m.store.UpdateFilename(ctx, dbid, fname); err != nil {
-					// Ignore expected errors during shutdown
-					if !isExpectedShutdownError(err) {
-						slog.Error("failed to update filename in store",
-							"event", "store_update_error",
-							"operation", "update_filename",
-							"db_id", dbid,
-							"filename", fname,
-							"error", err)
-					}
-				}
-			}()
+			m.persistFilenameToStore(item.DBID, filename)
 		}
 	}
 }
@@ -816,32 +767,15 @@ func (m *Manager) recordArtifacts(id string, paths []string) {
 		return
 	}
 
-	dbid := item.DBID
-	idCopy := id
-	m.bgWg.Add(1)
-	go func() {
-		defer m.bgWg.Done()
-		persistLock := m.artifactPersistLock(idCopy)
-		persistLock.Lock()
-		defer persistLock.Unlock()
+	persistLock := m.artifactPersistLock(id)
+	persistLock.Lock()
+	defer persistLock.Unlock()
 
-		pathsCopy := m.trackedArtifacts(idCopy)
-		if len(pathsCopy) == 0 {
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := m.store.UpdateArtifacts(ctx, dbid, pathsCopy); err != nil {
-			if !isExpectedShutdownError(err) {
-				slog.Error("failed to update artifacts in store",
-					"event", "store_update_error",
-					"operation", "update_artifacts",
-					"db_id", dbid,
-					"error", err)
-			}
-		}
-	}()
+	pathsCopy := m.trackedArtifacts(id)
+	if len(pathsCopy) == 0 {
+		return
+	}
+	m.persistArtifactsToStore(item.DBID, pathsCopy)
 }
 
 func (m *Manager) artifactPersistLock(id string) *sync.Mutex {
@@ -900,21 +834,74 @@ func (m *Manager) persistAndClearArtifacts(id string) {
 		if item != nil && item.DBID > 0 {
 			paths := m.trackedArtifacts(id)
 			if len(paths) > 0 {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				err := m.store.UpdateArtifacts(ctx, item.DBID, paths)
-				cancel()
-				if err != nil && !isExpectedShutdownError(err) {
-					slog.Error("failed to update artifacts in store",
-						"event", "store_update_error",
-						"operation", "update_artifacts",
-						"db_id", item.DBID,
-						"error", err)
-				}
+				m.persistArtifactsToStore(item.DBID, paths)
 			}
 		}
 	}
 
 	m.clearArtifacts(id)
+}
+
+func shouldRetryMetadataFetch(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, ErrNoMediaInfo) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
+}
+
+func fetchMediaInfoWithRetry(ctx context.Context, url string, dbID int64) (MediaInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= pendingMetadataMaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return MediaInfo{}, err
+		}
+
+		attemptCtx, cancel := context.WithTimeout(ctx, pendingMetadataTimeout)
+		info, err := fetchMediaInfo(attemptCtx, url)
+		cancel()
+		if err == nil {
+			return info, nil
+		}
+
+		lastErr = err
+		if !shouldRetryMetadataFetch(err) || attempt == pendingMetadataMaxAttempts {
+			break
+		}
+
+		slog.Warn("metadata fetch transient error; retrying",
+			"event", "metadata_fetch_retry",
+			"db_id", dbID,
+			"url", logging.RedactURL(url),
+			"attempt", attempt,
+			"max_attempts", pendingMetadataMaxAttempts,
+			"error", err)
+
+		timer := time.NewTimer(pendingMetadataRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return MediaInfo{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if lastErr == nil {
+		lastErr = ErrNoMediaInfo
+	}
+	return MediaInfo{}, lastErr
 }
 
 // ProcessPendingDownload processes a single pending download from the database.
@@ -935,10 +922,8 @@ func (m *Manager) ProcessPendingDownload(ctx context.Context, dbID int64, url st
 		return nil
 	}
 
-	// Fetch media info
-	metaCtx, metaCancel := context.WithTimeout(ctx, pendingMetadataTimeout)
-	defer metaCancel()
-	mediaInfo, err := fetchMediaInfo(metaCtx, url)
+	// Fetch media info with bounded retries for transient extractor/network failures.
+	mediaInfo, err := fetchMediaInfoWithRetry(ctx, url, dbID)
 	if err != nil {
 		logging.LogMetadataFetch(url, dbID, err)
 		// Update database with error
@@ -1003,6 +988,102 @@ func genID() string {
 	return hex.EncodeToString(b)
 }
 
+func (m *Manager) persistWithRetry(op string, dbID int64, fn func(context.Context) error, attrs ...any) {
+	if m.store == nil || dbID <= 0 {
+		return
+	}
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		timeout := 5 * time.Second
+		if attempt == 3 {
+			timeout = 10 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		lastErr = fn(ctx)
+		cancel()
+		if lastErr == nil {
+			return
+		}
+		if !(errors.Is(lastErr, context.DeadlineExceeded) || errors.Is(lastErr, context.Canceled)) {
+			break
+		}
+		if m.closing.Load() {
+			break
+		}
+	}
+	if !isExpectedShutdownError(lastErr) {
+		logFields := []any{
+			"event", "store_update_error",
+			"operation", op,
+			"db_id", dbID,
+		}
+		logFields = append(logFields, attrs...)
+		logFields = append(logFields, "error", lastErr)
+		slog.Error("failed to update store", logFields...)
+	}
+}
+
+func (m *Manager) persistProgressToStore(dbID int64, progress float64) {
+	m.persistWithRetry("update_progress", dbID, func(ctx context.Context) error {
+		return m.store.UpdateProgress(ctx, dbID, progress)
+	}, "progress", progress)
+}
+
+func (m *Manager) persistStatusToStore(dbID int64, status, errMsg string) {
+	m.persistWithRetry("update_status", dbID, func(ctx context.Context) error {
+		return m.store.UpdateStatus(ctx, dbID, status, errMsg)
+	}, "status", status)
+}
+
+func (m *Manager) persistFilenameToStore(dbID int64, filename string) {
+	m.persistWithRetry("update_filename", dbID, func(ctx context.Context) error {
+		return m.store.UpdateFilename(ctx, dbID, filename)
+	}, "filename", filename)
+}
+
+func (m *Manager) persistArtifactsToStore(dbID int64, paths []string) {
+	m.persistWithRetry("update_artifacts", dbID, func(ctx context.Context) error {
+		return m.store.UpdateArtifacts(ctx, dbID, paths)
+	}, "artifact_count", len(paths))
+}
+
+func (m *Manager) persistTerminalSnapshot(id string) {
+	if id == "" {
+		return
+	}
+	item := m.registry.Get(id)
+	if item == nil || item.DBID <= 0 || m.store == nil {
+		return
+	}
+	status := stateToStatus(item.State)
+	m.persistStatusToStore(item.DBID, status, item.Error)
+	if item.State == StateCompleted {
+		m.persistProgressToStore(item.DBID, 100)
+	}
+	if item.Filename != "" {
+		m.persistFilenameToStore(item.DBID, item.Filename)
+	}
+}
+
+func stateToStatus(st State) string {
+	switch st {
+	case StateQueued:
+		return "pending"
+	case StateDownloading:
+		return "downloading"
+	case StateCompleted:
+		return "completed"
+	case StateFailed:
+		return "error"
+	case StatePaused:
+		return "paused"
+	case StateCanceled:
+		return "canceled"
+	default:
+		return "pending"
+	}
+}
+
 // truncateUTF8 truncates a string to at most n bytes while preserving UTF-8 validity
 func truncateUTF8(s string, n int) string {
 	if n <= 0 {
@@ -1033,13 +1114,8 @@ func isExpectedShutdownError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
 	// These are system-level errors from database/sql and context packages
 	// that don't expose typed errors, so string checking is necessary here
 	errStr := err.Error()
-	return errStr == "sql: database is closed" ||
-		errStr == "context deadline exceeded" ||
-		errStr == "context canceled"
+	return errStr == "sql: database is closed"
 }
