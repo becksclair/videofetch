@@ -136,6 +136,15 @@ Request:
 { "id": 123 }
 ```
 
+### DELETE `/api/history/clear`
+
+Remove all recent history rows (`completed`, `error`, `canceled`) without deleting any output files.
+
+Response:
+```json
+{ "status": "success", "message": "cleared", "count": 42 }
+```
+
 ### DELETE `/api/delete`
 
 Delete a completed download's output file(s) and remove its history row.
@@ -260,6 +269,7 @@ A React + Tailwind extension lives in `./webext` and provides:
 - Keyboard shortcut to enqueue current page URL (default: `Alt+X`)
 - Context-menu enqueue (link/media/page URL)
 - Pause/resume/cancel/play/remove/delete actions
+- Bulk clear for recent history rows
 - Optional desktop notifications (completed/error/canceled)
 
 Build steps:

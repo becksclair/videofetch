@@ -57,6 +57,13 @@ export async function deleteRecord(baseUrl: string, id: number): Promise<void> {
   });
 }
 
+export async function clearHistory(baseUrl: string): Promise<number> {
+  const payload = await requestJson<{ count?: number }>(endpoint(baseUrl, '/api/history/clear'), {
+    method: 'DELETE'
+  });
+  return typeof payload.count === 'number' ? payload.count : 0;
+}
+
 export async function controlAction(
   baseUrl: string,
   action: 'pause' | 'resume' | 'cancel' | 'play',
