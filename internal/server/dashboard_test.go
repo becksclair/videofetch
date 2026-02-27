@@ -131,6 +131,7 @@ type mockMgr struct {
 	pauseFn    func(dbID int64) bool
 	cancelFn   func(dbID int64) bool
 	resumeFn   func(dbID int64) (bool, error)
+	managedFn  func(dbID int64) bool
 }
 
 func (m *mockMgr) Enqueue(url string) (string, error)                            { return m.enqueueFn(url) }
@@ -154,4 +155,10 @@ func (m *mockMgr) ResumeByDBID(dbID int64) (bool, error) {
 		return false, nil
 	}
 	return m.resumeFn(dbID)
+}
+func (m *mockMgr) IsManagedByDBID(dbID int64) bool {
+	if m.managedFn == nil {
+		return false
+	}
+	return m.managedFn(dbID)
 }

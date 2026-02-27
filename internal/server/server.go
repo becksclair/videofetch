@@ -35,6 +35,7 @@ type downloadManager interface {
 	PauseByDBID(dbID int64) bool
 	CancelByDBID(dbID int64) bool
 	ResumeByDBID(dbID int64) (bool, error)
+	IsManagedByDBID(dbID int64) bool
 }
 
 type Options struct {
@@ -219,6 +220,20 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "deleted"})
 		})
 
+		mux.HandleFunc("/api/history/clear", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodDelete {
+				methodNotAllowed(w)
+				return
+			}
+			deleted, err := st.DeleteHistory(r.Context())
+			if err != nil {
+				logging.LogDBOperation("delete_history", 0, err)
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "cleared", "count": deleted})
+		})
+
 		mux.HandleFunc("/api/delete", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodDelete {
 				methodNotAllowed(w)
@@ -398,8 +413,31 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 					return
 				}
 				if updated.Status == "downloading" {
-					if !mgr.PauseByDBID(req.ID) {
-						writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+					if mgr.IsManagedByDBID(req.ID) {
+						if !mgr.PauseByDBID(req.ID) {
+							writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+							return
+						}
+					} else {
+						orphanPaused, err := st.TryPauseUnlessTerminal(r.Context(), req.ID)
+						if err != nil {
+							writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+							return
+						}
+						updated, found, err = st.GetDownloadByID(r.Context(), req.ID)
+						if err != nil {
+							writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+							return
+						}
+						if !found {
+							writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+							return
+						}
+						if !orphanPaused && (updated.Status == "completed" || updated.Status == "canceled") {
+							writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+							return
+						}
+						writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "paused", "download": updated})
 						return
 					}
 				} else {
@@ -446,8 +484,35 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 				writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
 				return
 			}
-			if row.Status == "downloading" || row.Status == "pending" {
+			if row.Status == "pending" {
 				writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "already_running"})
+				return
+			}
+			if row.Status == "downloading" {
+				if mgr.IsManagedByDBID(req.ID) {
+					writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "already_running"})
+					return
+				}
+				// Orphaned downloading row: move back to pending only if still downloading at write time.
+				moved, err := st.TryMarkPendingFromDownloading(r.Context(), req.ID)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+					return
+				}
+				updated, found, err := st.GetDownloadByID(r.Context(), req.ID)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "message": "internal_error"})
+					return
+				}
+				if !found {
+					writeJSON(w, http.StatusNotFound, map[string]any{"status": "error", "message": "not_found"})
+					return
+				}
+				if !moved && (updated.Status == "completed" || updated.Status == "canceled") {
+					writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"status": "success", "message": "resumed", "download": updated})
 				return
 			}
 			if row.Status != "paused" && row.Status != "canceled" && row.Status != "error" {
@@ -557,8 +622,13 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 					return
 				}
 				if updated.Status == "downloading" {
-					cancelRequested = mgr.CancelByDBID(req.ID)
-					if !cancelRequested {
+					if mgr.IsManagedByDBID(req.ID) {
+						cancelRequested = mgr.CancelByDBID(req.ID)
+						if !cancelRequested {
+							writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
+							return
+						}
+					} else {
 						writeJSON(w, http.StatusConflict, map[string]any{"status": "error", "message": "invalid_state"})
 						return
 					}

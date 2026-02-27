@@ -901,6 +901,119 @@ func TestCancelControl_RemovesTrackedArtifacts(t *testing.T) {
 	}
 }
 
+func TestClearHistoryEndpoint_RemovesOnlyTerminalStatuses(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	ctx := context.Background()
+	pendingID, err := testStore.CreateDownload(ctx, "https://example.com/pending", "Pending", 0, "", "pending", 0)
+	if err != nil {
+		t.Fatalf("CreateDownload(pending) failed: %v", err)
+	}
+	downloadingID, err := testStore.CreateDownload(ctx, "https://example.com/downloading", "Downloading", 0, "", "downloading", 5)
+	if err != nil {
+		t.Fatalf("CreateDownload(downloading) failed: %v", err)
+	}
+	pausedID, err := testStore.CreateDownload(ctx, "https://example.com/paused", "Paused", 0, "", "paused", 30)
+	if err != nil {
+		t.Fatalf("CreateDownload(paused) failed: %v", err)
+	}
+	completedID, err := testStore.CreateDownload(ctx, "https://example.com/completed", "Completed", 0, "", "completed", 100)
+	if err != nil {
+		t.Fatalf("CreateDownload(completed) failed: %v", err)
+	}
+	errorID, err := testStore.CreateDownload(ctx, "https://example.com/error", "Error", 0, "", "error", 50)
+	if err != nil {
+		t.Fatalf("CreateDownload(error) failed: %v", err)
+	}
+	canceledID, err := testStore.CreateDownload(ctx, "https://example.com/canceled", "Canceled", 0, "", "canceled", 0)
+	if err != nil {
+		t.Fatalf("CreateDownload(canceled) failed: %v", err)
+	}
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, t.TempDir())
+
+	resp := doJSON(t, h, http.MethodDelete, "/api/history/clear", "", nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("clear history status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() failed: %v", err)
+	}
+	if payload["message"] != "cleared" {
+		t.Fatalf("expected cleared message, got %+v", payload)
+	}
+	if payload["count"] != float64(3) {
+		t.Fatalf("expected count=3, got %+v", payload["count"])
+	}
+
+	for _, id := range []int64{completedID, errorID, canceledID} {
+		_, found, err := testStore.GetDownloadByID(ctx, id)
+		if err != nil {
+			t.Fatalf("GetDownloadByID(%d) failed: %v", id, err)
+		}
+		if found {
+			t.Fatalf("expected terminal row %d to be deleted", id)
+		}
+	}
+
+	for _, id := range []int64{pendingID, downloadingID, pausedID} {
+		_, found, err := testStore.GetDownloadByID(ctx, id)
+		if err != nil {
+			t.Fatalf("GetDownloadByID(%d) failed: %v", id, err)
+		}
+		if !found {
+			t.Fatalf("expected active row %d to remain", id)
+		}
+	}
+}
+
+func TestClearHistoryEndpoint_EmptyHistoryReturnsZero(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	ctx := context.Background()
+	if _, err := testStore.CreateDownload(ctx, "https://example.com/pending", "Pending", 0, "", "pending", 0); err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, t.TempDir())
+
+	resp := doJSON(t, h, http.MethodDelete, "/api/history/clear", "", nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("clear history status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal() failed: %v", err)
+	}
+	if payload["count"] != float64(0) {
+		t.Fatalf("expected count=0, got %+v", payload["count"])
+	}
+}
+
+func TestClearHistoryEndpoint_MethodNotAllowed(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, testStore, t.TempDir())
+
+	resp := doJSON(t, h, http.MethodPost, "/api/history/clear", "", nil)
+	if resp.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestDeleteEndpoint_CompletedRemovesFilesAndRow(t *testing.T) {
 	testStore := setupTestServerStore(t)
 	defer testStore.Close()
@@ -1141,6 +1254,7 @@ func TestPauseControl_DownloadingRequiresManagerAck(t *testing.T) {
 		enqueueFn:  func(url string) (string, error) { return "", nil },
 		snapshotFn: func(id string) []*download.Item { return nil },
 		pauseFn:    func(dbID int64) bool { return false },
+		managedFn:  func(dbID int64) bool { return true },
 	}, testStore, t.TempDir())
 
 	resp := doJSON(t, h, http.MethodPost, "/api/control/pause", "", map[string]any{"id": id})
@@ -1171,6 +1285,7 @@ func TestCancelControl_DownloadingRequiresManagerAck(t *testing.T) {
 		enqueueFn:  func(url string) (string, error) { return "", nil },
 		snapshotFn: func(id string) []*download.Item { return nil },
 		cancelFn:   func(dbID int64) bool { return false },
+		managedFn:  func(dbID int64) bool { return true },
 	}, testStore, t.TempDir())
 
 	resp := doJSON(t, h, http.MethodPost, "/api/control/cancel", "", map[string]any{"id": id})
@@ -1184,6 +1299,99 @@ func TestCancelControl_DownloadingRequiresManagerAck(t *testing.T) {
 	}
 	if row.Status != "downloading" {
 		t.Fatalf("expected status to remain downloading, got %q", row.Status)
+	}
+}
+
+func TestPauseControl_OrphanDownloadingFallsBackToDB(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	ctx := context.Background()
+	id, err := testStore.CreateDownload(ctx, "https://example.com/video", "Video", 0, "", "downloading", 42)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+		pauseFn:    func(dbID int64) bool { return false },
+		managedFn:  func(dbID int64) bool { return false },
+	}, testStore, t.TempDir())
+
+	resp := doJSON(t, h, http.MethodPost, "/api/control/pause", "", map[string]any{"id": id})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for orphan downloading pause fallback, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	row, found, err := testStore.GetDownloadByID(ctx, id)
+	if err != nil || !found {
+		t.Fatalf("GetDownloadByID() failed: found=%v err=%v", found, err)
+	}
+	if row.Status != "paused" {
+		t.Fatalf("expected paused status, got %q", row.Status)
+	}
+}
+
+func TestCancelControl_OrphanDownloadingRequiresManagerAck(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	ctx := context.Background()
+	id, err := testStore.CreateDownload(ctx, "https://example.com/video", "Video", 0, "", "downloading", 42)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+		cancelFn:   func(dbID int64) bool { return false },
+		managedFn:  func(dbID int64) bool { return false },
+	}, testStore, t.TempDir())
+
+	resp := doJSON(t, h, http.MethodPost, "/api/control/cancel", "", map[string]any{"id": id})
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for unmanaged downloading row without manager ack, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	row, found, err := testStore.GetDownloadByID(ctx, id)
+	if err != nil || !found {
+		t.Fatalf("GetDownloadByID() failed: found=%v err=%v", found, err)
+	}
+	if row.Status != "downloading" {
+		t.Fatalf("expected status to remain downloading, got %q", row.Status)
+	}
+}
+
+func TestResumeControl_OrphanDownloadingBecomesPending(t *testing.T) {
+	testStore := setupTestServerStore(t)
+	defer testStore.Close()
+
+	ctx := context.Background()
+	id, err := testStore.CreateDownload(ctx, "https://example.com/video", "Video", 0, "", "downloading", 42)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+		resumeFn:   func(dbID int64) (bool, error) { return false, nil },
+		managedFn:  func(dbID int64) bool { return false },
+	}, testStore, t.TempDir())
+
+	resp := doJSON(t, h, http.MethodPost, "/api/control/resume", "", map[string]any{"id": id})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for orphan downloading resume fallback, got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	row, found, err := testStore.GetDownloadByID(ctx, id)
+	if err != nil || !found {
+		t.Fatalf("GetDownloadByID() failed: found=%v err=%v", found, err)
+	}
+	if row.Status != "pending" {
+		t.Fatalf("expected pending status after orphan resume fallback, got %q", row.Status)
 	}
 }
 
@@ -1204,6 +1412,7 @@ func TestPauseControl_PendingBecomesDownloadingRequiresManagerAck(t *testing.T) 
 			_ = testStore.UpdateStatus(context.Background(), dbID, "downloading", "")
 			return false
 		},
+		managedFn: func(dbID int64) bool { return true },
 	}, testStore, t.TempDir())
 
 	resp := doJSON(t, h, http.MethodPost, "/api/control/pause", "", map[string]any{"id": id})
@@ -1237,6 +1446,7 @@ func TestCancelControl_PendingBecomesDownloadingRequiresManagerAck(t *testing.T)
 			_ = testStore.UpdateStatus(context.Background(), dbID, "downloading", "")
 			return false
 		},
+		managedFn: func(dbID int64) bool { return true },
 	}, testStore, t.TempDir())
 
 	resp := doJSON(t, h, http.MethodPost, "/api/control/cancel", "", map[string]any{"id": id})

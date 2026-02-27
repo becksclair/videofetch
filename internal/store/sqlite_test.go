@@ -119,6 +119,58 @@ func TestUpdateStatus(t *testing.T) {
 	}
 }
 
+func TestUpdateStatus_DownloadingDoesNotDowngradeCompleted(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	id, err := store.CreateDownload(ctx, "https://example.com/video", "Test Video", 300, "", "completed", 100.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	if err := store.UpdateStatus(ctx, id, "downloading", ""); err != nil {
+		t.Fatalf("UpdateStatus(downloading) failed: %v", err)
+	}
+
+	row, found, err := store.GetDownloadByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetDownloadByID() failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected row to exist")
+	}
+	if row.Status != "completed" {
+		t.Fatalf("expected status to remain completed, got %q", row.Status)
+	}
+}
+
+func TestUpdateStatus_DownloadingDoesNotDowngradeCanceled(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	id, err := store.CreateDownload(ctx, "https://example.com/video", "Test Video", 300, "", "canceled", 20.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+	if err := store.UpdateStatus(ctx, id, "downloading", ""); err != nil {
+		t.Fatalf("UpdateStatus(downloading) failed: %v", err)
+	}
+
+	row, found, err := store.GetDownloadByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetDownloadByID() failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected row to exist")
+	}
+	if row.Status != "canceled" {
+		t.Fatalf("expected status to remain canceled, got %q", row.Status)
+	}
+}
+
 func TestUpdateStatus_PersistErrorAndClear(t *testing.T) {
 	store := setupTestStore(t)
 	defer store.Close()
@@ -405,6 +457,51 @@ func TestTryCancelNotDownloading(t *testing.T) {
 	}
 	if canceled {
 		t.Fatalf("did not expect downloading row to be canceled")
+	}
+}
+
+func TestTryMarkPendingFromDownloading(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	downloadingID, err := store.CreateDownload(ctx, "https://example.com/downloading-resume", "Downloading", 0, "", "downloading", 42)
+	if err != nil {
+		t.Fatalf("CreateDownload(downloading) failed: %v", err)
+	}
+	completedID, err := store.CreateDownload(ctx, "https://example.com/completed-resume", "Completed", 0, "", "completed", 100)
+	if err != nil {
+		t.Fatalf("CreateDownload(completed) failed: %v", err)
+	}
+
+	moved, err := store.TryMarkPendingFromDownloading(ctx, downloadingID)
+	if err != nil {
+		t.Fatalf("TryMarkPendingFromDownloading(downloading) failed: %v", err)
+	}
+	if !moved {
+		t.Fatalf("expected downloading row to move to pending")
+	}
+	row, found, err := store.GetDownloadByID(ctx, downloadingID)
+	if err != nil || !found {
+		t.Fatalf("GetDownloadByID(downloading) failed: found=%v err=%v", found, err)
+	}
+	if row.Status != "pending" {
+		t.Fatalf("expected pending status, got %q", row.Status)
+	}
+
+	moved, err = store.TryMarkPendingFromDownloading(ctx, completedID)
+	if err != nil {
+		t.Fatalf("TryMarkPendingFromDownloading(completed) failed: %v", err)
+	}
+	if moved {
+		t.Fatalf("did not expect completed row to move to pending")
+	}
+	row, found, err = store.GetDownloadByID(ctx, completedID)
+	if err != nil || !found {
+		t.Fatalf("GetDownloadByID(completed) failed: found=%v err=%v", found, err)
+	}
+	if row.Status != "completed" {
+		t.Fatalf("expected completed status to remain unchanged, got %q", row.Status)
 	}
 }
 
@@ -789,6 +886,114 @@ func TestGetIncompleteDownloads_ExcludesPausedAndCanceled(t *testing.T) {
 	}
 	if !statuses["pending"] || !statuses["downloading"] || !statuses["error"] {
 		t.Fatalf("unexpected statuses in retryable set: %+v", statuses)
+	}
+}
+
+func TestDeleteHistory_RemovesOnlyTerminalStatuses(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	pendingID, err := store.CreateDownload(ctx, "https://example.com/pending", "Pending", 0, "", "pending", 0)
+	if err != nil {
+		t.Fatalf("CreateDownload(pending) failed: %v", err)
+	}
+	downloadingID, err := store.CreateDownload(ctx, "https://example.com/downloading", "Downloading", 0, "", "downloading", 10)
+	if err != nil {
+		t.Fatalf("CreateDownload(downloading) failed: %v", err)
+	}
+	pausedID, err := store.CreateDownload(ctx, "https://example.com/paused", "Paused", 0, "", "paused", 30)
+	if err != nil {
+		t.Fatalf("CreateDownload(paused) failed: %v", err)
+	}
+	completedID, err := store.CreateDownload(ctx, "https://example.com/completed", "Completed", 0, "", "completed", 100)
+	if err != nil {
+		t.Fatalf("CreateDownload(completed) failed: %v", err)
+	}
+	errorID, err := store.CreateDownload(ctx, "https://example.com/error", "Error", 0, "", "error", 50)
+	if err != nil {
+		t.Fatalf("CreateDownload(error) failed: %v", err)
+	}
+	canceledID, err := store.CreateDownload(ctx, "https://example.com/canceled", "Canceled", 0, "", "canceled", 0)
+	if err != nil {
+		t.Fatalf("CreateDownload(canceled) failed: %v", err)
+	}
+
+	deleted, err := store.DeleteHistory(ctx)
+	if err != nil {
+		t.Fatalf("DeleteHistory() failed: %v", err)
+	}
+	if deleted != 3 {
+		t.Fatalf("expected 3 deleted rows, got %d", deleted)
+	}
+
+	for _, id := range []int64{completedID, errorID, canceledID} {
+		_, found, err := store.GetDownloadByID(ctx, id)
+		if err != nil {
+			t.Fatalf("GetDownloadByID(%d) failed: %v", id, err)
+		}
+		if found {
+			t.Fatalf("expected terminal row %d to be deleted", id)
+		}
+	}
+
+	for _, tc := range []struct {
+		id     int64
+		status string
+	}{
+		{id: pendingID, status: "pending"},
+		{id: downloadingID, status: "downloading"},
+		{id: pausedID, status: "paused"},
+	} {
+		row, found, err := store.GetDownloadByID(ctx, tc.id)
+		if err != nil {
+			t.Fatalf("GetDownloadByID(%d) failed: %v", tc.id, err)
+		}
+		if !found {
+			t.Fatalf("expected active row %d to remain", tc.id)
+		}
+		if row.Status != tc.status {
+			t.Fatalf("expected row %d status %q, got %q", tc.id, tc.status, row.Status)
+		}
+	}
+}
+
+func TestDeleteHistory_EmitsResyncEventWhenRowsDeleted(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	changes, unsubscribe := store.SubscribeChanges(8)
+	defer unsubscribe()
+
+	if _, err := store.CreateDownload(ctx, "https://example.com/completed", "Completed", 0, "", "completed", 100); err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+
+drain:
+	for {
+		select {
+		case <-changes:
+		default:
+			break drain
+		}
+	}
+
+	deleted, err := store.DeleteHistory(ctx)
+	if err != nil {
+		t.Fatalf("DeleteHistory() failed: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected 1 deleted row, got %d", deleted)
+	}
+
+	select {
+	case evt := <-changes:
+		if evt.Type != ChangeUpsert || evt.ID != 0 {
+			t.Fatalf("expected resync event, got %+v", evt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for resync event")
 	}
 }
 

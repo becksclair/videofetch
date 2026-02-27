@@ -267,6 +267,8 @@ func (s *Store) UpdateStatus(ctx context.Context, id int64, status string, errMs
 		} else {
 			_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, st, trimmedErr, id)
 		}
+	} else if st == "downloading" {
+		_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status NOT IN ('completed', 'canceled')`, st, id)
 	} else {
 		_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, st, id)
 	}
@@ -433,6 +435,28 @@ WHERE id = ? AND status IN ('paused', 'canceled', 'error')`, id)
 	return affected == 1, nil
 }
 
+// TryMarkPendingFromDownloading transitions a downloading row back to pending.
+// Returns true when the transition was applied.
+func (s *Store) TryMarkPendingFromDownloading(ctx context.Context, id int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE downloads
+SET status = 'pending',
+    error_message = NULL,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND status = 'downloading'`, id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 1 {
+		logging.LogDBUpdate("try_mark_pending_from_downloading", id, map[string]any{"status": "pending"})
+		s.emitChange(ChangeEvent{Type: ChangeUpsert, ID: id})
+	}
+	return affected == 1, nil
+}
+
 // ListDownloads returns downloads filtered and sorted.
 type ListFilter struct {
 	Status string // optional: pending|downloading|paused|completed|error|canceled
@@ -544,6 +568,24 @@ func (s *Store) DeleteDownload(ctx context.Context, id int64) error {
 	logging.LogDBOperation("delete_download", id, nil)
 	s.emitChange(ChangeEvent{Type: ChangeDelete, ID: id})
 	return nil
+}
+
+// DeleteHistory removes terminal history rows (completed/error/canceled) and returns the deleted count.
+func (s *Store) DeleteHistory(ctx context.Context) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM downloads WHERE status IN ('completed', 'error', 'canceled')`)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	logging.LogDBOperation("delete_history", 0, nil)
+	if affected > 0 {
+		// Trigger a list resync for subscribers; bulk deletes may involve many rows.
+		s.emitChange(ChangeEvent{Type: ChangeUpsert, ID: 0})
+	}
+	return affected, nil
 }
 
 // IsURLCompleted checks if a URL already exists with status "completed"
