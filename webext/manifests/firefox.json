@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "VideoFetch Sidebar",
   "description": "Control VideoFetch downloads with realtime progress, pause/resume/cancel, and native play.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "icons": {
     "128": "icons/icon-128.png"
   },
