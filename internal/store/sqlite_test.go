@@ -27,6 +27,37 @@ func TestOpen(t *testing.T) {
 	}
 }
 
+func TestOpen_CreatesUpdatedAtIndex(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	rows, err := store.db.Query(`PRAGMA index_list(downloads)`)
+	if err != nil {
+		t.Fatalf("PRAGMA index_list failed: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			seq     int
+			name    string
+			unique  int
+			origin  string
+			partial int
+		)
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			t.Fatalf("scan index row failed: %v", err)
+		}
+		if name == "idx_downloads_updated_at" {
+			return
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate index rows failed: %v", err)
+	}
+	t.Fatalf("expected idx_downloads_updated_at to exist")
+}
+
 func TestCreateDownload(t *testing.T) {
 	store := setupTestStore(t)
 	defer store.Close()
@@ -612,7 +643,6 @@ func TestListDownloads_FilterByStatus(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Create downloads with different statuses
 	_, err := store.CreateDownload(ctx, "https://example.com/video1", "Video 1", 300, "", "pending", 0.0)
 	if err != nil {
 		t.Fatalf("CreateDownload() failed: %v", err)
@@ -624,6 +654,20 @@ func TestListDownloads_FilterByStatus(t *testing.T) {
 	_, err = store.CreateDownload(ctx, "https://example.com/video3", "Video 3", 500, "", "completed", 100.0)
 	if err != nil {
 		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+	_, err = store.CreateDownload(ctx, "https://example.com/video4", "Video 4", 500, "", "error", 100.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+	_, err = store.CreateDownload(ctx, "https://example.com/video5", "Video 5", 500, "", "canceled", 100.0)
+	if err != nil {
+		t.Fatalf("CreateDownload() failed: %v", err)
+	}
+	_, err = store.db.ExecContext(ctx, `
+INSERT INTO downloads (url, title, duration, thumbnail_url, status, progress, artifact_paths)
+VALUES (?, ?, ?, ?, ?, ?, ?)`, "https://example.com/legacy", "Legacy", 0, "", "legacy", 0.0, "[]")
+	if err != nil {
+		t.Fatalf("insert legacy download failed: %v", err)
 	}
 
 	// Test filtering by status
@@ -639,6 +683,34 @@ func TestListDownloads_FilterByStatus(t *testing.T) {
 	if downloads[0].Status != "downloading" {
 		t.Errorf("Expected status 'downloading', got %s", downloads[0].Status)
 	}
+
+	downloads, err = store.ListDownloads(ctx, ListFilter{Status: "active"})
+	if err != nil {
+		t.Fatalf("ListDownloads(active) failed: %v", err)
+	}
+	if len(downloads) != 2 {
+		t.Fatalf("Expected 2 active downloads, got %d", len(downloads))
+	}
+
+	downloads, err = store.ListDownloads(ctx, ListFilter{Status: "history"})
+	if err != nil {
+		t.Fatalf("ListDownloads(history) failed: %v", err)
+	}
+	if len(downloads) != 3 {
+		t.Fatalf("Expected 3 history downloads, got %d", len(downloads))
+	}
+	historyStatuses := make(map[string]bool, len(downloads))
+	for _, download := range downloads {
+		historyStatuses[download.Status] = true
+	}
+	for _, status := range []string{"completed", "error", "canceled"} {
+		if !historyStatuses[status] {
+			t.Errorf("Expected history status %q", status)
+		}
+	}
+	if historyStatuses["legacy"] {
+		t.Errorf("Expected legacy status to be excluded from history")
+	}
 }
 
 func TestListDownloads_Sort(t *testing.T) {
@@ -648,12 +720,12 @@ func TestListDownloads_Sort(t *testing.T) {
 	ctx := context.Background()
 
 	// Create downloads with different titles
-	_, err := store.CreateDownload(ctx, "https://example.com/video1", "B Video", 300, "", "pending", 0.0)
+	firstID, err := store.CreateDownload(ctx, "https://example.com/video1", "B Video", 300, "", "pending", 0.0)
 	if err != nil {
 		t.Fatalf("CreateDownload() failed: %v", err)
 	}
 	time.Sleep(10 * time.Millisecond) // Ensure different timestamps
-	_, err = store.CreateDownload(ctx, "https://example.com/video2", "A Video", 400, "", "pending", 0.0)
+	secondID, err := store.CreateDownload(ctx, "https://example.com/video2", "A Video", 400, "", "pending", 0.0)
 	if err != nil {
 		t.Fatalf("CreateDownload() failed: %v", err)
 	}
@@ -673,6 +745,26 @@ func TestListDownloads_Sort(t *testing.T) {
 	}
 	if downloads[1].Title != "B Video" {
 		t.Errorf("Expected second download to be 'B Video', got %s", downloads[1].Title)
+	}
+
+	time.Sleep(10 * time.Millisecond) // Ensure updated_at moves past the second row.
+	if err := store.UpdateProgress(ctx, firstID, 50.0); err != nil {
+		t.Fatalf("UpdateProgress() failed: %v", err)
+	}
+
+	downloads, err = store.ListDownloads(ctx, ListFilter{Sort: "updated_at", Order: "desc"})
+	if err != nil {
+		t.Fatalf("ListDownloads(updated_at) failed: %v", err)
+	}
+
+	if len(downloads) != 2 {
+		t.Fatalf("Expected 2 downloads, got %d", len(downloads))
+	}
+	if downloads[0].ID != firstID {
+		t.Errorf("Expected recently updated download %d first, got %d", firstID, downloads[0].ID)
+	}
+	if downloads[1].ID != secondID {
+		t.Errorf("Expected older updated download %d second, got %d", secondID, downloads[1].ID)
 	}
 }
 

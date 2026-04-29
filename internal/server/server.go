@@ -1263,7 +1263,7 @@ func isAllowedWebSocketOrigin(r *http.Request) bool {
 	}
 
 	switch strings.ToLower(parsed.Scheme) {
-	case "chrome-extension":
+	case "chrome-extension", "moz-extension":
 		return parsed.Host != ""
 	case "http", "https":
 		return strings.EqualFold(parsed.Host, r.Host)

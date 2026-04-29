@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS downloads (
 );
 CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status);
 CREATE INDEX IF NOT EXISTS idx_downloads_created_at ON downloads(created_at);
+CREATE INDEX IF NOT EXISTS idx_downloads_updated_at ON downloads(updated_at);
 CREATE INDEX IF NOT EXISTS idx_downloads_url_status ON downloads(url, status);
 `
 	_, err := db.Exec(ddl)
@@ -156,6 +157,10 @@ func hasColumn(db *sql.DB, table, column string) (bool, error) {
 		}
 	}
 	return false, rows.Err()
+}
+
+func sqliteTimestampNow() string {
+	return time.Now().UTC().Format("2006-01-02 15:04:05.999999999")
 }
 
 // Close closes the underlying DB.
@@ -236,7 +241,7 @@ func (s *Store) UpdateArtifacts(ctx context.Context, id int64, paths []string) e
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE downloads SET artifact_paths = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, string(payload), id)
+	_, err = s.db.ExecContext(ctx, `UPDATE downloads SET artifact_paths = ?, updated_at = ? WHERE id = ?`, string(payload), sqliteTimestampNow(), id)
 	if err != nil {
 		return err
 	}
@@ -247,7 +252,7 @@ func (s *Store) UpdateArtifacts(ctx context.Context, id int64, paths []string) e
 
 // UpdateProgress sets progress and bumps updated_at.
 func (s *Store) UpdateProgress(ctx context.Context, id int64, progress float64) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE downloads SET progress = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, progress, id)
+	_, err := s.db.ExecContext(ctx, `UPDATE downloads SET progress = ?, updated_at = ? WHERE id = ?`, progress, sqliteTimestampNow(), id)
 	if err != nil {
 		return err
 	}
@@ -260,17 +265,18 @@ func (s *Store) UpdateProgress(ctx context.Context, id int64, progress float64) 
 func (s *Store) UpdateStatus(ctx context.Context, id int64, status string, errMsg string) error {
 	st := normalizeStatus(status)
 	var err error
+	now := sqliteTimestampNow()
 	if st == "error" {
 		trimmedErr := strings.TrimSpace(errMsg)
 		if trimmedErr == "" {
-			_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, st, id)
+			_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = NULL, updated_at = ? WHERE id = ?`, st, now, id)
 		} else {
-			_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, st, trimmedErr, id)
+			_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = ?, updated_at = ? WHERE id = ?`, st, trimmedErr, now, id)
 		}
 	} else if st == "downloading" {
-		_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status NOT IN ('completed', 'canceled')`, st, id)
+		_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = NULL, updated_at = ? WHERE id = ? AND status NOT IN ('completed', 'canceled')`, st, now, id)
 	} else {
-		_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, st, id)
+		_, err = s.db.ExecContext(ctx, `UPDATE downloads SET status = ?, error_message = NULL, updated_at = ? WHERE id = ?`, st, now, id)
 	}
 	if err != nil {
 		return err
@@ -304,7 +310,8 @@ func (s *Store) UpdateMeta(ctx context.Context, id int64, title string, duration
 	if len(sets) == 0 {
 		return nil
 	}
-	sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
+	sets = append(sets, "updated_at = ?")
+	args = append(args, sqliteTimestampNow())
 	q := "UPDATE downloads SET " + strings.Join(sets, ", ") + " WHERE id = ?"
 	args = append(args, id)
 	_, err := s.db.ExecContext(ctx, q, args...)
@@ -324,7 +331,7 @@ func (s *Store) UpdateMeta(ctx context.Context, id int64, title string, duration
 // TryClaimPending atomically transitions a pending download to downloading.
 // Returns true when claim succeeds, false when the row was not pending.
 func (s *Store) TryClaimPending(ctx context.Context, id int64) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'downloading', error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'`, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'downloading', error_message = NULL, updated_at = ? WHERE id = ? AND status = 'pending'`, sqliteTimestampNow(), id)
 	if err != nil {
 		return false, err
 	}
@@ -341,7 +348,7 @@ func (s *Store) TryClaimPending(ctx context.Context, id int64) (bool, error) {
 // TryCancel transitions a download to canceled unless it is already completed/canceled.
 // Returns true when the transition was applied.
 func (s *Store) TryCancel(ctx context.Context, id int64) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'canceled', error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status NOT IN ('completed', 'canceled')`, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'canceled', error_message = NULL, updated_at = ? WHERE id = ? AND status NOT IN ('completed', 'canceled')`, sqliteTimestampNow(), id)
 	if err != nil {
 		return false, err
 	}
@@ -359,7 +366,7 @@ func (s *Store) TryCancel(ctx context.Context, id int64) (bool, error) {
 // TryCancelNotDownloading transitions a download to canceled only when it is not downloading.
 // Returns true when the transition was applied.
 func (s *Store) TryCancelNotDownloading(ctx context.Context, id int64) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'canceled', error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status NOT IN ('completed', 'canceled', 'downloading')`, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'canceled', error_message = NULL, updated_at = ? WHERE id = ? AND status NOT IN ('completed', 'canceled', 'downloading')`, sqliteTimestampNow(), id)
 	if err != nil {
 		return false, err
 	}
@@ -377,7 +384,7 @@ func (s *Store) TryCancelNotDownloading(ctx context.Context, id int64) (bool, er
 // TryPause transitions a download to paused only when it is not downloading/completed/canceled.
 // Returns true when the transition was applied.
 func (s *Store) TryPause(ctx context.Context, id int64) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'paused', error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('pending', 'error')`, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'paused', error_message = NULL, updated_at = ? WHERE id = ? AND status IN ('pending', 'error')`, sqliteTimestampNow(), id)
 	if err != nil {
 		return false, err
 	}
@@ -395,7 +402,7 @@ func (s *Store) TryPause(ctx context.Context, id int64) (bool, error) {
 // TryPauseUnlessTerminal transitions a download to paused unless it is in a terminal state.
 // Returns true when the transition was applied.
 func (s *Store) TryPauseUnlessTerminal(ctx context.Context, id int64) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'paused', error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status NOT IN ('completed', 'canceled')`, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'paused', error_message = NULL, updated_at = ? WHERE id = ? AND status NOT IN ('completed', 'canceled')`, sqliteTimestampNow(), id)
 	if err != nil {
 		return false, err
 	}
@@ -419,8 +426,8 @@ SET status = 'downloading',
     progress = CASE WHEN status IN ('canceled', 'error') THEN 0 ELSE progress END,
     filename = CASE WHEN status IN ('canceled', 'error') THEN NULL ELSE filename END,
     artifact_paths = CASE WHEN status IN ('canceled', 'error') THEN NULL ELSE artifact_paths END,
-    updated_at = CURRENT_TIMESTAMP
-WHERE id = ? AND status IN ('paused', 'canceled', 'error')`, id)
+    updated_at = ?
+WHERE id = ? AND status IN ('paused', 'canceled', 'error')`, sqliteTimestampNow(), id)
 	if err != nil {
 		return false, err
 	}
@@ -441,8 +448,8 @@ func (s *Store) TryMarkPendingFromDownloading(ctx context.Context, id int64) (bo
 	res, err := s.db.ExecContext(ctx, `UPDATE downloads
 SET status = 'pending',
     error_message = NULL,
-    updated_at = CURRENT_TIMESTAMP
-WHERE id = ? AND status = 'downloading'`, id)
+    updated_at = ?
+WHERE id = ? AND status = 'downloading'`, sqliteTimestampNow(), id)
 	if err != nil {
 		return false, err
 	}
@@ -459,8 +466,8 @@ WHERE id = ? AND status = 'downloading'`, id)
 
 // ListDownloads returns downloads filtered and sorted.
 type ListFilter struct {
-	Status string // optional: pending|downloading|paused|completed|error|canceled
-	Sort   string // created_at|title|status
+	Status string // optional: active|history|pending|downloading|paused|completed|error|canceled
+	Sort   string // created_at|updated_at|title|status
 	Order  string // asc|desc
 	Limit  int    // optional
 	Offset int    // optional
@@ -475,6 +482,8 @@ func (s *Store) ListDownloads(ctx context.Context, f ListFilter) ([]Download, er
 		sortCol = "status"
 	case "created_at", "date":
 		sortCol = "created_at"
+	case "updated_at", "updated":
+		sortCol = "updated_at"
 	}
 	order := "DESC"
 	if strings.ToLower(f.Order) == "asc" {
@@ -483,13 +492,21 @@ func (s *Store) ListDownloads(ctx context.Context, f ListFilter) ([]Download, er
 	var args []any
 	sb := strings.Builder{}
 	sb.WriteString("SELECT id, url, title, duration, thumbnail_url, status, progress, filename, artifact_paths, error_message, created_at, updated_at FROM downloads")
-	if f.Status != "" {
+	switch strings.ToLower(strings.TrimSpace(f.Status)) {
+	case "":
+	case "active":
+		sb.WriteString(" WHERE status IN ('pending', 'downloading', 'paused')")
+	case "history", "terminal":
+		sb.WriteString(" WHERE status IN ('completed', 'error', 'canceled')")
+	default:
 		sb.WriteString(" WHERE status = ?")
 		args = append(args, normalizeStatus(f.Status))
 	}
 	sb.WriteString(" ORDER BY ")
 	sb.WriteString(sortCol)
 	sb.WriteByte(' ')
+	sb.WriteString(order)
+	sb.WriteString(", id ")
 	sb.WriteString(order)
 	if f.Limit > 0 {
 		sb.WriteString(" LIMIT ?")
@@ -550,7 +567,7 @@ WHERE id = ?`, id).Scan(
 
 // UpdateFilename sets the filename when download is complete.
 func (s *Store) UpdateFilename(ctx context.Context, id int64, filename string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE downloads SET filename = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, filename, id)
+	_, err := s.db.ExecContext(ctx, `UPDATE downloads SET filename = ?, updated_at = ? WHERE id = ?`, filename, sqliteTimestampNow(), id)
 	if err != nil {
 		return err
 	}
@@ -767,7 +784,7 @@ func (s *Store) CountDownloadsByStatus(ctx context.Context, status string) (int6
 
 // RetryFailedDownloads resets all failed downloads back to pending status for retry
 func (s *Store) RetryFailedDownloads(ctx context.Context) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'pending', progress = 0, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE status = 'error'`)
+	result, err := s.db.ExecContext(ctx, `UPDATE downloads SET status = 'pending', progress = 0, error_message = NULL, updated_at = ? WHERE status = 'error'`, sqliteTimestampNow())
 	if err != nil {
 		return 0, err
 	}

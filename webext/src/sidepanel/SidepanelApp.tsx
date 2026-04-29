@@ -10,9 +10,22 @@ import {
   wsUrl
 } from '@/lib/api';
 import { loadSettings } from '@/lib/storage';
+import { ext, hasServerPermission } from '@/lib/webext';
 import type { DownloadRow, DownloadStatus, ExtensionSettings } from '@/types';
 
 const PAGE_SIZE = 120;
+const DOWNLOAD_LIST_OPTIONS = {
+  sort: 'updated_at',
+  order: 'desc'
+} as const;
+const ACTIVE_DOWNLOAD_LIST_OPTIONS = {
+  ...DOWNLOAD_LIST_OPTIONS,
+  status: 'active'
+} as const;
+const HISTORY_DOWNLOAD_LIST_OPTIONS = {
+  ...DOWNLOAD_LIST_OPTIONS,
+  status: 'history'
+} as const;
 
 type RealtimeMode = 'ws' | 'poll';
 type RailTone = 'ok' | 'warn' | 'err';
@@ -82,11 +95,41 @@ function queueCandidateURL(url: string | undefined): string {
   return /^https?:\/\//i.test(url) ? url : '';
 }
 
+async function fetchVisibleDownloads(baseUrl: string, historyLimit: number): Promise<DownloadRow[]> {
+  const [activeRows, historyRows] = await Promise.all([
+    fetchDownloads(baseUrl, { ...ACTIVE_DOWNLOAD_LIST_OPTIONS, limit: PAGE_SIZE, offset: 0 }),
+    fetchDownloads(baseUrl, { ...HISTORY_DOWNLOAD_LIST_OPTIONS, limit: historyLimit, offset: 0 })
+  ]);
+  return mergeRows(activeRows, historyRows);
+}
+
+function mergeRows(...groups: DownloadRow[][]): DownloadRow[] {
+  const byID = new Map<number, DownloadRow>();
+  for (const group of groups) {
+    for (const row of group) {
+      byID.set(row.id, row);
+    }
+  }
+  return sortRows(Array.from(byID.values()));
+}
+
+function applyRowsUpserts(current: DownloadRow[], upserts: DownloadRow[]): DownloadRow[] {
+  const byID = new Map<number, DownloadRow>();
+  for (const row of current) {
+    byID.set(row.id, row);
+  }
+  for (const row of upserts) {
+    byID.set(row.id, row);
+  }
+  return sortRows(Array.from(byID.values()));
+}
+
 export function SidepanelApp() {
   const [settings, setSettings] = useState<ExtensionSettings | null>(null);
   const [mode, setMode] = useState<RealtimeMode>('poll');
   const [railMessage, setRailMessage] = useState('Initializing VideoFetch link...');
   const [railTone, setRailTone] = useState<RailTone>('warn');
+  const [needsServerPermission, setNeedsServerPermission] = useState(false);
   const [downloads, setDownloads] = useState<DownloadRow[]>([]);
   const [enqueueUrl, setEnqueueUrl] = useState('');
   const [enqueueBusy, setEnqueueBusy] = useState(false);
@@ -99,7 +142,11 @@ export function SidepanelApp() {
   const reconnectTimer = useRef<number | null>(null);
   const pollTimer = useRef<number | null>(null);
   const enqueueSyncSeq = useRef(0);
+  const httpRefreshSeq = useRef(0);
   const copyResetTimers = useRef<Record<number, number>>({});
+  const historyOffsetRef = useRef(PAGE_SIZE);
+  const wsUpsertSeq = useRef(0);
+  const wsUpsertsByID = useRef(new Map<number, { row: DownloadRow; seq: number }>());
 
   const activeRows = useMemo(
     () => downloads.filter((row) => row.status === 'pending' || row.status === 'downloading' || row.status === 'paused'),
@@ -110,10 +157,14 @@ export function SidepanelApp() {
     [downloads]
   );
 
+  useEffect(() => {
+    historyOffsetRef.current = historyOffset;
+  }, [historyOffset]);
+
   const syncEnqueueFromActiveTab = useCallback(async () => {
     const requestID = ++enqueueSyncSeq.current;
     try {
-      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      const [tab] = await ext.tabs.query({ active: true, lastFocusedWindow: true });
       if (requestID !== enqueueSyncSeq.current) {
         return;
       }
@@ -131,9 +182,26 @@ export function SidepanelApp() {
     loadSettings()
       .then((loaded) => {
         if (!mounted) return;
-        setSettings(loaded);
-        setRailTone('warn');
-        setRailMessage('VideoFetch link ready. Connecting realtime stream...');
+        void hasServerPermission(loaded.serverBaseUrl)
+          .then((hasPermission) => {
+            if (!mounted) return;
+            setNeedsServerPermission(!hasPermission);
+            if (!hasPermission) {
+              setSettings(null);
+              setRailTone('warn');
+              setRailMessage('Server access permission is required. Open settings and save the VideoFetch Base URL.');
+              return;
+            }
+            setSettings(loaded);
+            setRailTone('warn');
+            setRailMessage('VideoFetch link ready. Connecting realtime stream...');
+          })
+          .catch((error) => {
+            if (!mounted) return;
+            setSettings(null);
+            setRailTone('err');
+            setRailMessage(`Failed to check server permission: ${String(error)}`);
+          });
       })
       .catch((error) => {
         if (!mounted) return;
@@ -161,34 +229,34 @@ export function SidepanelApp() {
       void syncEnqueueFromActiveTab();
     };
 
-    const onActivated = (_info: chrome.tabs.TabActiveInfo) => {
+    const onActivated: Parameters<typeof ext.tabs.onActivated.addListener>[0] = () => {
       runSync();
     };
 
-    const onUpdated = (_tabID: number, changeInfo: chrome.tabs.TabChangeInfo, tab: chrome.tabs.Tab) => {
+    const onUpdated: Parameters<typeof ext.tabs.onUpdated.addListener>[0] = (_tabID, changeInfo, tab) => {
       if (!tab.active || !changeInfo.url) {
         return;
       }
       runSync();
     };
 
-    const onFocusChanged = (windowID: number) => {
-      if (windowID === chrome.windows.WINDOW_ID_NONE) {
+    const onFocusChanged: Parameters<typeof ext.windows.onFocusChanged.addListener>[0] = (windowID) => {
+      if (windowID === ext.windows.WINDOW_ID_NONE) {
         return;
       }
       runSync();
     };
 
     runSync();
-    chrome.tabs.onActivated.addListener(onActivated);
-    chrome.tabs.onUpdated.addListener(onUpdated);
-    chrome.windows.onFocusChanged.addListener(onFocusChanged);
+    ext.tabs.onActivated.addListener(onActivated);
+    ext.tabs.onUpdated.addListener(onUpdated);
+    ext.windows.onFocusChanged.addListener(onFocusChanged);
 
     return () => {
       active = false;
-      chrome.tabs.onActivated.removeListener(onActivated);
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      chrome.windows.onFocusChanged.removeListener(onFocusChanged);
+      ext.tabs.onActivated.removeListener(onActivated);
+      ext.tabs.onUpdated.removeListener(onUpdated);
+      ext.windows.onFocusChanged.removeListener(onFocusChanged);
     };
   }, [syncEnqueueFromActiveTab]);
 
@@ -202,9 +270,9 @@ export function SidepanelApp() {
       setRailMessage('Keyboard enqueue accepted for current tab URL.');
     };
 
-    chrome.runtime.onMessage.addListener(listener);
+    ext.runtime.onMessage.addListener(listener);
     return () => {
-      chrome.runtime.onMessage.removeListener(listener);
+      ext.runtime.onMessage.removeListener(listener);
     };
   }, []);
 
@@ -221,14 +289,21 @@ export function SidepanelApp() {
       }
     };
 
-    const refreshViaHttp = async () => {
+    const refreshViaHttp = async (historyLimit = historyOffsetRef.current, resetHistory = false) => {
+      const requestID = ++httpRefreshSeq.current;
+      const startedAtUpsertSeq = wsUpsertSeq.current;
       try {
-        const rows = await fetchDownloads(settings.serverBaseUrl, { limit: PAGE_SIZE, offset: 0 });
-        if (closed) return;
-        setDownloads(sortRows(rows));
-        setHistoryOffset(PAGE_SIZE);
+        const rows = await fetchVisibleDownloads(settings.serverBaseUrl, historyLimit);
+        if (closed || requestID !== httpRefreshSeq.current) return;
+        const newerUpserts = Array.from(wsUpsertsByID.current.values())
+          .filter((entry) => entry.seq > startedAtUpsertSeq)
+          .map((entry) => entry.row);
+        setDownloads(newerUpserts.length > 0 ? mergeRows(rows, newerUpserts) : rows);
+        if (resetHistory) {
+          setHistoryOffset(PAGE_SIZE);
+        }
       } catch (error) {
-        if (closed) return;
+        if (closed || requestID !== httpRefreshSeq.current) return;
         setRailTone('err');
         setRailMessage(`Polling failed: ${String(error)}`);
       }
@@ -278,24 +353,21 @@ export function SidepanelApp() {
         const parsed = decodeWsMessage(event.data);
         if (!parsed) return;
         if (parsed.type === 'snapshot') {
-          setDownloads(sortRows(parsed.downloads));
-          setHistoryOffset(PAGE_SIZE);
+          void refreshViaHttp(PAGE_SIZE, true);
           return;
         }
         if (parsed.type === 'diff') {
-          setDownloads((current) => {
-            const byID = new Map<number, DownloadRow>();
-            for (const row of current) {
-              byID.set(row.id, row);
-            }
+          if (parsed.upserts.length > 0) {
+            const seq = wsUpsertSeq.current + 1;
+            wsUpsertSeq.current = seq;
             for (const row of parsed.upserts) {
-              byID.set(row.id, row);
+              wsUpsertsByID.current.set(row.id, { row, seq });
             }
-            for (const id of parsed.deletes) {
-              byID.delete(id);
-            }
-            return sortRows(Array.from(byID.values()));
-          });
+            setDownloads((current) => applyRowsUpserts(current, parsed.upserts));
+          }
+          if (parsed.deletes.length > 0) {
+            void refreshViaHttp();
+          }
         }
       };
 
@@ -350,8 +422,8 @@ export function SidepanelApp() {
       }
       setRailTone('ok');
       setRailMessage(`${action.toUpperCase()} accepted for #${row.id}.`);
-      const rows = await fetchDownloads(settings.serverBaseUrl, { limit: historyOffset, offset: 0 });
-      setDownloads(sortRows(rows));
+      const rows = await fetchVisibleDownloads(settings.serverBaseUrl, historyOffset);
+      setDownloads(rows);
     } catch (error) {
       setRailTone('err');
       setRailMessage(`${action.toUpperCase()} failed: ${String(error)}`);
@@ -415,8 +487,8 @@ export function SidepanelApp() {
     setClearHistoryBusy(true);
     try {
       const cleared = await clearHistory(settings.serverBaseUrl);
-      const rows = await fetchDownloads(settings.serverBaseUrl, { limit: historyOffset, offset: 0 });
-      setDownloads(sortRows(rows));
+      const rows = await fetchVisibleDownloads(settings.serverBaseUrl, historyOffset);
+      setDownloads(rows);
       setRailTone('ok');
       setRailMessage(`Cleared ${cleared} recent history ${cleared === 1 ? 'row' : 'rows'}.`);
     } catch (error) {
@@ -472,6 +544,7 @@ export function SidepanelApp() {
     setHistoryLoading(true);
     try {
       const more = await fetchDownloads(settings.serverBaseUrl, {
+        ...HISTORY_DOWNLOAD_LIST_OPTIONS,
         limit: PAGE_SIZE,
         offset: historyOffset
       });
@@ -505,7 +578,16 @@ export function SidepanelApp() {
           </div>
 
           <div className={`mb-3 rounded bg-black/35 px-3 py-2 text-[11px] ${railTone === 'ok' ? 'vf-rail-ok' : railTone === 'warn' ? 'vf-rail-warn' : 'vf-rail-err'}`}>
-            {railMessage}
+            <div>{railMessage}</div>
+            {needsServerPermission ? (
+              <button
+                className="mt-2 rounded border border-amber-300/45 bg-amber-400/15 px-2 py-1 text-[10px] font-semibold tracking-[0.08em] text-amber-100 hover:bg-amber-400/25"
+                onClick={() => void ext.runtime.openOptionsPage()}
+                type="button"
+              >
+                OPEN SETTINGS
+              </button>
+            ) : null}
           </div>
         </div>
       </section>

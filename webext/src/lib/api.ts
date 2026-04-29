@@ -25,12 +25,20 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 export async function fetchDownloads(
   baseUrl: string,
-  options: { limit?: number; offset?: number; status?: string } = {}
+  options: {
+    limit?: number;
+    offset?: number;
+    status?: string;
+    sort?: 'created_at' | 'date' | 'updated_at' | 'title' | 'status';
+    order?: 'asc' | 'desc';
+  } = {}
 ): Promise<DownloadRow[]> {
   const query = new URLSearchParams();
   if (options.limit && options.limit > 0) query.set('limit', String(options.limit));
   if (options.offset && options.offset > 0) query.set('offset', String(options.offset));
   if (options.status) query.set('status', options.status);
+  if (options.sort) query.set('sort', options.sort);
+  if (options.order) query.set('order', options.order);
   const suffix = query.toString() ? `?${query.toString()}` : '';
   const data = await requestJson<DownloadsResponse>(endpoint(baseUrl, `/api/downloads${suffix}`));
   return data.downloads || [];
@@ -81,6 +89,8 @@ export function wsUrl(baseUrl: string, limit = 200): string {
   parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
   parsed.pathname = '/api/ws/downloads';
   parsed.searchParams.set('limit', String(limit));
+  parsed.searchParams.set('sort', 'updated_at');
+  parsed.searchParams.set('order', 'desc');
   return parsed.toString();
 }
 

@@ -1,7 +1,20 @@
 import { useEffect, useState } from 'react';
 import { normalizeBaseUrl } from '@/lib/api';
 import { loadSettings, saveSettings } from '@/lib/storage';
+import { ext, originPermissionForBaseUrl } from '@/lib/webext';
 import { DEFAULT_SETTINGS } from '@/types';
+
+async function ensureServerPermission(baseUrl: string): Promise<void> {
+  const origins = [originPermissionForBaseUrl(baseUrl)];
+  const permissions = ext.permissions;
+  if (!permissions) {
+    return;
+  }
+  const granted = await permissions.request({ origins });
+  if (!granted) {
+    throw new Error('server_origin_permission_denied');
+  }
+}
 
 export function OptionsApp() {
   const [serverBaseUrl, setServerBaseUrl] = useState(DEFAULT_SETTINGS.serverBaseUrl);
@@ -20,17 +33,23 @@ export function OptionsApp() {
   }, []);
 
   const onSave = async () => {
-    const normalized = normalizeBaseUrl(serverBaseUrl.trim());
-    await saveSettings({
-      serverBaseUrl: normalized,
-      notificationsEnabled
-    });
-    setStatus('Saved.');
+    try {
+      const normalized = normalizeBaseUrl(serverBaseUrl.trim());
+      await ensureServerPermission(normalized);
+      await saveSettings({
+        serverBaseUrl: normalized,
+        notificationsEnabled
+      });
+      setStatus('Saved.');
+    } catch (error) {
+      setStatus(`Save failed: ${String(error)}`);
+    }
   };
 
   const testConnection = async () => {
     const normalized = normalizeBaseUrl(serverBaseUrl.trim());
     try {
+      await ensureServerPermission(normalized);
       const response = await fetch(`${normalized}/healthz`);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);

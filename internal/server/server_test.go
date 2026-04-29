@@ -1699,6 +1699,11 @@ func TestIsAllowedWebSocketOrigin(t *testing.T) {
 		t.Fatalf("expected chrome extension origin to be allowed")
 	}
 
+	req.Header.Set("Origin", "moz-extension://12345678-1234-1234-1234-123456789abc")
+	if !isAllowedWebSocketOrigin(req) {
+		t.Fatalf("expected firefox extension origin to be allowed")
+	}
+
 	req.Header.Set("Origin", "://bad-origin")
 	if isAllowedWebSocketOrigin(req) {
 		t.Fatalf("expected invalid origin header to be rejected")

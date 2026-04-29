@@ -259,7 +259,7 @@ Health check endpoint; returns `ok`.
 - Progress updates in real-time from 0-100%
 - Automatic fallbacks for metadata extraction failures
 
-## Chrome Extension (MV3 Sidepanel)
+## Browser Extensions
 
 A React + Tailwind extension lives in `./webext` and provides:
 - Sidepanel queue with realtime WebSocket updates (poll fallback)
@@ -272,15 +272,48 @@ A React + Tailwind extension lives in `./webext` and provides:
 - Bulk clear for recent history rows
 - Optional desktop notifications (completed/error/canceled)
 
-Build steps:
+Chrome build steps:
 
 ```bash
 cd webext
 bun install
-bun run build
+bun run build:chrome
 ```
 
-Then load `webext/dist` as an unpacked extension in Chrome (`chrome://extensions`).
+Then load `webext/dist/chrome` as an unpacked extension in Chrome (`chrome://extensions`).
+
+Firefox Desktop build steps:
+
+```bash
+cd webext
+bun install
+bun run build:firefox
+bun run lint:firefox
+```
+
+Then load `webext/dist/firefox` as a temporary add-on in Firefox (`about:debugging#/runtime/this-firefox`) or run it with:
+
+```bash
+bun run run:firefox
+```
+
+To build and sign a permanently installable Firefox XPI:
+
+```bash
+cd webext
+bun run sign:firefox
+```
+
+The signing script expects AMO credentials in `AMO_JWT_ISSUER`/`AMO_JWT_SECRET` or `WEB_EXT_API_KEY`/`WEB_EXT_API_SECRET`; if they are not already exported, it will try to source `~/personal/dotfiles/secrets.sh`. Signed artifacts are written to `webext/dist/artifacts` by default.
+
+Firefox local smoke tests should use the installed user systemd service instead of starting a second server:
+
+```bash
+systemctl --user status videofetch.service --no-pager
+curl -fsS http://127.0.0.1:8080/healthz
+```
+
+With the service healthy, open the VideoFetch sidebar, confirm settings point at `http://127.0.0.1:8080`, enqueue the active tab and context-menu URLs, and verify queue updates plus pause/resume/cancel/remove/delete/play actions against the running service. If you point the extension at a non-local VideoFetch server, the options page will ask for that server's host permission when you save or test the URL.
 
 ### Graceful Shutdown
 
