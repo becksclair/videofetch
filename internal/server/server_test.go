@@ -315,6 +315,44 @@ func TestDashboardRows_FilterAndSort(t *testing.T) {
 	}
 }
 
+func TestDashboardRows_FilterStoreStatusNamesWithoutStore(t *testing.T) {
+	items := []*download.Item{
+		{ID: "pending", URL: "https://pending", State: download.StateQueued, Progress: 0},
+		{ID: "error", URL: "https://error", State: download.StateFailed, Error: "boom"},
+		{ID: "active", URL: "https://active", State: download.StateDownloading, Progress: 20},
+	}
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "", nil },
+		snapshotFn: func(id string) []*download.Item { return items },
+	}, nil, "/tmp/test")
+
+	for _, tc := range []struct {
+		status string
+		want   string
+		absent []string
+	}{
+		{status: "pending", want: "https://pending", absent: []string{"https://error", "https://active"}},
+		{status: "error", want: "https://error", absent: []string{"https://pending", "https://active"}},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/dashboard/rows?status="+tc.status, nil)
+		req.Header.Set("X-Forwarded-For", "198.51.100.51")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s status=%d", tc.status, w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, tc.want) {
+			t.Fatalf("%s filter missing %q in body=%q", tc.status, tc.want, body)
+		}
+		for _, absent := range tc.absent {
+			if strings.Contains(body, absent) {
+				t.Fatalf("%s filter included %q in body=%q", tc.status, absent, body)
+			}
+		}
+	}
+}
+
 // Rate limiting has been removed - this test is now just checking that
 // multiple requests succeed without rate limiting
 func TestRateLimiting_Removed(t *testing.T) {

@@ -1,350 +1,151 @@
-# VideoFetch Service
+# VideoFetch
 
-Go-based web service for downloading videos via `yt-dlp` with a simple REST API, a concurrent download queue, progress tracking, a small dashboard, and rate limiting.
+VideoFetch is a Go service for queueing video downloads through `yt-dlp`. It provides a JSON API, a small HTMX dashboard, SQLite-backed history, WebSocket updates, and an optional browser extension.
 
 ## Requirements
 
 - Go 1.23+
-- `yt-dlp` installed and available on `PATH`
-  - Must support `--progress-template` (checked at startup).
+- `yt-dlp` on `PATH` with `--progress-template` support
+- Bun for CSS and browser-extension builds
+- `templ` only when editing `internal/ui/*.templ`
 
-## Quick start
+## Build, Run, Test
+
+```bash
+make build
+./videofetch --host 0.0.0.0 --port 8080
+```
+
+Default downloads go to `$HOME/Videos/videofetch`; the default database is `$HOME/.cache/videofetch/videofetch.db` on Linux/macOS and `%APPDATA%/videofetch/videofetch.db` on Windows.
+
+Useful commands:
 
 ```bash
 go build -o videofetch ./cmd/videofetch
-# By default, outputs to $HOME/Videos/videofetch
-./videofetch --port 8080 --host 0.0.0.0
-
+go test ./cmd/... ./internal/... -race
+go test -tags=integration ./internal/integration -v
+bun run build-css
+make generate
 ```
 
-## CLI flags
+`make generate` rebuilds Tailwind CSS and regenerates committed templ output. Run `make tools` if `templ` is missing.
 
-- `--output-dir` (optional): output directory for downloads (default: `$HOME/Videos/videofetch`, created if missing)
-- `--port` (default: `8080`)
-- `--host` (default: `0.0.0.0`)
-- `--workers` (default: `4`): concurrent download workers
-- `--queue` (default: `128`): queue capacity (backpressure)
-- `--db` (optional): SQLite database path; defaults to OS cache dir at `videofetch/videofetch.db`
-  - Windows: `%APPDATA%/videofetch/videofetch.db`
-  - Linux/macOS: `$HOME/.cache/videofetch/videofetch.db`
-- `--log-level` (default: `info`): Log level for structured JSON logging (`debug`, `info`, `warn`, `error`)
-- `--unsafe-log-payloads` (default: `false`): allow raw API payload dumps in debug logs (unsafe; may expose secrets)
+## CLI
 
-Notes:
-
-- The database is always enabled; omitting `--db` uses the default path above.
-- Rate limiting: 60 requests/minute per client IP.
-- Logging outputs structured JSON to stdout, suitable for aggregation systems (ELK, CloudWatch, etc.)
-- URL fields in logs are redacted by default (userinfo stripped, query values masked).
+- `--output-dir`: download directory, default `$HOME/Videos/videofetch`
+- `--host`: bind host, default `0.0.0.0`
+- `--port`: bind port, default `8080`
+- `--workers`: concurrent download workers, default `4`
+- `--queue`: queue capacity, default `128`
+- `--db`: SQLite database path, default OS cache path
+- `--log-level`: `debug`, `info`, `warn`, or `error`
+- `--unsafe-log-payloads`: log raw API payloads in debug output
 
 ## API
 
-Base URL: `http://HOST:PORT`
+All JSON endpoints return `{ "status": "success|error", ... }`.
 
-### POST `/api/download_single`
+### Queue Downloads
 
-Enqueue a single video URL for download. Automatically fetches video metadata (title, duration, thumbnail) when possible.
+```http
+POST /api/download_single
+Content-Type: application/json
 
-Request:
-
-```json
-{ "url": "https://video-site.com/watch?v=example" }
+{ "url": "https://example.com/video" }
 ```
 
-Response:
+Success responses include `message: "enqueued"` and `db_id` when SQLite is enabled. Duplicate URLs return `message: "already_exists"` with `existing_id` and `existing_status`.
 
-```json
-{ "status": "success|error", "message": "enqueued|already_exists", "db_id": 123, "existing_id": 123, "existing_status": "pending|downloading|paused|completed|error|canceled" }
+```http
+POST /api/download
+Content-Type: application/json
+
+{ "urls": ["https://example.com/one", "https://example.com/two"] }
 ```
 
-### POST `/api/download`
+Batch responses include `db_ids`. Invalid URLs are skipped; if no valid URLs remain, the response message is `no_valid_urls`.
 
-Enqueue multiple video URLs for download in batch.
+### Status and History
 
-Request:
+- `GET /api/status?id=<download-id>`: in-memory queue state; omit `id` for all active items.
+- `GET /api/downloads`: persisted downloads.
 
-```json
-{ "urls": ["https://...", "https://..."] }
-```
+`/api/downloads` query parameters:
 
-Response:
+- `status`: `active`, `history`, `pending`, `downloading`, `paused`, `completed`, `error`, or `canceled`
+- `sort`: `created_at`, `updated_at`, `date`, `title`, `status`, or `progress`
+- `order`: `asc` or `desc`
+- `limit`, `offset`: pagination
 
-```json
-{ "status": "success|error", "message": "string", "ids": ["..."], "db_ids": [123, 456] }
-```
+### Control
 
-### GET `/api/status[?id=<download-id>]`
+All control requests use JSON body `{ "id": 123 }`, where `id` is the SQLite row ID.
 
-Get real-time status of downloads from the in-memory queue. Use `id` parameter to filter by specific download.
+- `POST /api/control/pause`
+- `POST /api/control/resume`
+- `POST /api/control/cancel`
+- `POST /api/control/play`
+- `DELETE /api/remove`: remove a download row without deleting files
+- `DELETE /api/delete`: delete completed output files and remove the row
+- `DELETE /api/history/clear`: remove completed/error/canceled rows
+- `POST /api/retry_failed`: reset failed rows to pending
+- `GET /api/download_file?id=123`: serve a completed output file
 
-Response:
+### WebSocket and Health
 
-```json
-{
-  "status": "success",
-  "downloads": [
-    {
-      "id": "...",
-      "url": "...",
-      "progress": 0,
-      "state": "queued|downloading|completed|failed",
-      "error": "",
-      "title": "optional",
-      "duration": 0,
-      "thumbnail_url": "optional"
-    }
-  ]
-}
-```
+- `GET /api/ws/downloads`: sends a `snapshot`, then coalesced `diff` events and `heartbeat` frames. Accepts the same list filters as `/api/downloads`.
+- `GET /healthz`: returns `ok`.
 
-### GET `/api/downloads`
+Common error messages: `invalid_request`, `invalid_url`, `queue_full`, `no_valid_urls`, `invalid_state`, `not_found`, `not_playable`, `file_not_found`, `delete_failed`, `player_launch_failed`, `shutting_down`, `method_not_allowed`, `internal_error`.
 
-Lists persisted downloads from SQLite database with filtering and sorting.
+## Dashboard
 
-Query params: `status=pending|downloading|paused|completed|error|canceled`, `sort=created_at|title|status`, `order=asc|desc`, `limit=<n>`, `offset=<n>`.
+Open `http://HOST:PORT/` or `/dashboard`.
 
-Response:
+The dashboard is server-rendered with templ and HTMX. It can enqueue URLs, list history, filter/sort rows, retry failed downloads, remove rows, and download completed files. Generated `internal/ui/*_templ.go` files are committed.
 
-```json
-{
-  "status": "success",
-  "downloads": [
-    {
-      "id": 1,
-      "url": "...",
-      "title": "...",
-      "duration": 123,
-      "thumbnail_url": "...",
-      "status": "downloading",
-      "progress": 42.0,
-      "filename": "optional",
-      "artifact_paths": ["optional absolute/relative tracked file paths"],
-      "error_message": "optional",
-      "created_at": "...",
-      "updated_at": "..."
-    }
-  ]
-}
-```
+## Browser Extension
 
-### DELETE `/api/remove`
-
-Remove a download row from history only (does not delete output files).
-
-Request:
-```json
-{ "id": 123 }
-```
-
-### DELETE `/api/history/clear`
-
-Remove all recent history rows (`completed`, `error`, `canceled`) without deleting any output files.
-
-Response:
-```json
-{ "status": "success", "message": "cleared", "count": 42 }
-```
-
-### DELETE `/api/delete`
-
-Delete a completed download's output file(s) and remove its history row.
-
-Request:
-```json
-{ "id": 123 }
-```
-
-Notes:
-- Only valid for `completed` rows.
-- If file deletion fails, the row is kept and the endpoint returns `delete_failed`.
-
-### POST `/api/control/pause`
-Pause a queued/downloading item by DB record ID.
-
-Request:
-```json
-{ "id": 123 }
-```
-
-### POST `/api/control/resume`
-Resume a paused/canceled/error item by DB record ID.
-
-Request:
-```json
-{ "id": 123 }
-```
-
-### POST `/api/control/cancel`
-Cancel an in-flight or queued item by DB record ID.
-
-Request:
-```json
-{ "id": 123 }
-```
-
-### POST `/api/control/play`
-Launch the completed file in the server host's default media player.
-
-Request:
-```json
-{ "id": 123 }
-```
-
-### GET `/api/ws/downloads`
-WebSocket stream for realtime download updates. Supports the same list query params as `/api/downloads` (for example `limit`, `offset`, `status`).
-
-Event types:
-- `snapshot`: full list on connect
-- `diff`: incremental changes with `upserts` and `deletes` (coalesced over a short server window to reduce chatter)
-- `heartbeat`: keepalive frame
-
-### GET `/healthz`
-
-Health check endpoint; returns `ok`.
-
-## Error codes/messages
-
-- `invalid_request`: malformed JSON body or missing fields
-- `invalid_url`: URL is missing or not http/https
-- `yt_dlp_not_found`: `yt-dlp` not installed or missing `--progress-template`
-- `queue_full`: server queue is full; retry later
-- `invalid_state`: action is not valid for current row status
-- `shutting_down`: server is draining; try again later
-- `internal_error`: unexpected server error
-
-## Dashboard (Templ + HTMX)
-
-- Visit `http://HOST:PORT/dashboard` (or `/`) for a web dashboard
-- Features:
-  - Download form for single/batch URL submission
-  - Real-time progress tracking (auto-refreshes every 1s)
-  - Download history with filtering and sorting
-  - Video metadata display (title, duration, thumbnails)
-- Server-rendered using `github.com/a-h/templ` with HTMX for dynamic updates
-- No client-side JavaScript build required
-
-### Development
-
-- Generated `.templ` Go files are committed to the repository
-- To modify templates:
-  - Install tools: `make tools`
-  - Regenerate: `make generate`
-- CSS built from Tailwind v4: `bun run build-css` → `./static/style.css`
-
-## Testing
-
-- **Unit tests** (handlers, state management): `go test ./... -race`
-- **Integration tests** (real `yt-dlp` + network):
-  - Run: `go test -tags=integration ./internal/integration -v`
-  - Environment overrides:
-    - `INTEGRATION_URL=https://...` (single test URL)
-    - `INTEGRATION_URLS="https://u1, https://u2"` (multiple test URLs)
-  - Tests include: metadata extraction, database persistence, download workflows
-- **Coverage**: Generate with `go test -coverprofile=coverage.out ./...`
-
-## Architecture & Features
-
-### Core Components
-
-- **Download Manager**: Worker pool with configurable concurrency and bounded queue
-- **Progress Tracking**: Real-time parsing from `yt-dlp` using custom `--progress-template`
-- **Database**: SQLite persistence for download history and metadata
-- **Rate Limiting**: 60 requests/minute per client IP
-- **Metadata Extraction**: Automatic fetching of video title, duration, and thumbnails
-
-### Download Behavior
-
-- Uses `yt-dlp` default format selection for maximum compatibility
-- Includes embedded subtitles, metadata, thumbnails, and chapters
-- Progress updates in real-time from 0-100%
-- Automatic fallbacks for metadata extraction failures
-
-## Browser Extensions
-
-A React + Tailwind extension lives in `./webext` and provides:
-- Sidepanel queue with realtime WebSocket updates (poll fallback)
-- URL enqueue from sidepanel
-- Toolbar-click enqueue for the current tab URL
-- Keyboard shortcut to open side panel (default: `Alt+Z`)
-- Keyboard shortcut to enqueue current page URL (default: `Alt+X`)
-- Context-menu enqueue (link/media/page URL)
-- Pause/resume/cancel/play/remove/delete actions
-- Bulk clear for recent history rows
-- Optional desktop notifications (completed/error/canceled)
-
-Chrome build steps:
+The React/Tailwind extension lives in `webext/`.
 
 ```bash
 cd webext
 bun install
 bun run build:chrome
-```
-
-Then load `webext/dist/chrome` as an unpacked extension in Chrome (`chrome://extensions`).
-
-Firefox Desktop build steps:
-
-```bash
-cd webext
-bun install
 bun run build:firefox
 bun run lint:firefox
 ```
 
-Then load `webext/dist/firefox` as a temporary add-on in Firefox (`about:debugging#/runtime/this-firefox`) or run it with:
+Load `webext/dist/chrome` as an unpacked Chrome extension, or load `webext/dist/firefox` in Firefox from `about:debugging#/runtime/this-firefox`.
+
+Useful extension scripts:
+
+- `bun run run:firefox`: build and run in Firefox with `web-ext`
+- `bun run sign:firefox`: sign an XPI using AMO credentials from the environment or `~/personal/dotfiles/secrets.sh`
+
+## systemd User Service
 
 ```bash
-bun run run:firefox
-```
-
-To build and sign a permanently installable Firefox XPI:
-
-```bash
-cd webext
-bun run sign:firefox
-```
-
-The signing script expects AMO credentials in `AMO_JWT_ISSUER`/`AMO_JWT_SECRET` or `WEB_EXT_API_KEY`/`WEB_EXT_API_SECRET`; if they are not already exported, it will try to source `~/personal/dotfiles/secrets.sh`. Signed artifacts are written to `webext/dist/artifacts` by default.
-
-Firefox local smoke tests should use the installed user systemd service instead of starting a second server:
-
-```bash
-systemctl --user status videofetch.service --no-pager
+make install
+systemctl --user enable --now videofetch.service
 curl -fsS http://127.0.0.1:8080/healthz
 ```
 
-With the service healthy, open the VideoFetch sidebar, confirm settings point at `http://127.0.0.1:8080`, enqueue the active tab and context-menu URLs, and verify queue updates plus pause/resume/cancel/remove/delete/play actions against the running service. If you point the extension at a non-local VideoFetch server, the options page will ask for that server's host permission when you save or test the URL.
+The service binds to `127.0.0.1:8080`, downloads to `$HOME/Videos/videofetch`, and writes the database under `$HOME/.cache/videofetch`.
 
-### Graceful Shutdown
+## Architecture Notes
 
-1. Stop accepting new HTTP requests
-2. Drain existing HTTP connections
-3. Cancel in-flight downloads
-4. Close database connections
+- `cmd/videofetch/main.go`: flags, config, logger, store, manager, server wiring, shutdown.
+- `internal/download`: bounded queue, worker pool, yt-dlp execution, monotonic progress, resume/retry coordination.
+- `internal/store`: SQLite schema and typed helpers for history, control state, and artifact paths.
+- `internal/server`: JSON API, dashboard handlers, static files, WebSocket stream, logging middleware.
+- `internal/ui`: templ dashboard components and display helpers.
+- `webext`: browser extension source.
 
-### File Organization
+Operational constraints worth preserving:
 
-- Downloaded files saved to `--output-dir` with original filenames
-- Database stored in OS cache directory by default
-- Static assets served from `./static/` directory
-
-### Structured Logging
-
-VideoFetch uses structured JSON logging for better observability and integration with log aggregation systems:
-
-- **Format**: JSON lines to stdout with ISO8601 timestamps
-- **Levels**: `DEBUG`, `INFO`, `WARN`, `ERROR` (set via `--log-level` flag)
-- **Event Types**: Each log entry includes an `event` field for filtering:
-  - `server_start`, `server_shutdown`: Server lifecycle events
-  - `http_request`: HTTP request logging with method, path, duration
-  - `download_*`: Download lifecycle (start, progress, complete, error)
-  - `db_*`: Database operations (create, update, delete)
-  - `metadata_*`: Metadata fetching operations
-  - `ytdlp_*`: yt-dlp command execution
-  - `dbworker_*`: Background worker operations
-
-Example log entries:
-```json
-{"time":"2025-10-19T08:00:00Z","level":"INFO","msg":"server started","event":"server_start","addr":"0.0.0.0:8080","workers":4}
-{"time":"2025-10-19T08:00:01Z","level":"INFO","msg":"download complete","event":"download_complete","download_id":"abc123","db_id":"42","filename":"video.mp4"}
-{"time":"2025-10-19T08:00:02Z","level":"DEBUG","msg":"download progress","event":"download_progress","download_id":"abc123","progress":75.5}
+- Client-facing error strings are stable contracts.
+- Progress should not decrease.
+- Queue capacity is bounded; do not replace backpressure with unbounded growth.
+- Pass dependencies explicitly; avoid package-level mutable state.
+- Raw URLs and request bodies should stay redacted unless `--unsafe-log-payloads` is enabled.

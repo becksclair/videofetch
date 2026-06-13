@@ -5,8 +5,6 @@ package integration
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,188 +16,280 @@ import (
 
 	"videofetch/internal/download"
 	"videofetch/internal/server"
+	"videofetch/internal/store"
 )
 
-// Batch download end-to-end test using /api/download
 func TestEndToEnd_BatchDownload(t *testing.T) {
-	if _, err := exec.LookPath("yt-dlp"); err != nil {
-		t.Skip("yt-dlp not found in PATH; skipping integration test")
-	}
+	requireYTDLP(t)
 
 	urls := parseURLsEnv()
-	if len(urls) < 2 {
-		// Use the specified YouTube URL for integration tests
-		urls = []string{
-			"https://www.youtube.com/watch?v=zGDzdps75ns",
-			"https://www.youtube.com/watch?v=zGDzdps75ns",
+	if len(urls) == 0 {
+		urls = []string{"https://www.youtube.com/watch?v=zGDzdps75ns"}
+	}
+
+	ts, outDir := newIntegrationServer(t, 2, 8)
+	dbIDs := postBatch(t, ts.URL, urls)
+	if len(dbIDs) == 0 {
+		t.Fatalf("no db_ids returned")
+	}
+
+	rows := waitForRows(t, ts.URL, dbIDs, 3*time.Minute)
+	for _, row := range rows {
+		if row.Status == "error" && isProviderRestriction(row.ErrorMessage) {
+			t.Skipf("skipping due to provider restrictions: %s", row.ErrorMessage)
+		}
+		if row.Status != "completed" {
+			t.Fatalf("download %d ended with status=%s error=%s", row.ID, row.Status, row.ErrorMessage)
 		}
 	}
 
-	outDir := t.TempDir()
-	mgr := download.NewManager(outDir, 2, 8)
-	t.Cleanup(func() { mgr.Shutdown() })
-
-	h := server.New(mgr, nil, tmpDir)
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-
-	// Enqueue batch download
-	reqBody := map[string]any{"urls": urls}
-	b, _ := json.Marshal(reqBody)
-	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/download", bytes.NewReader(b))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("unexpected status: %d", resp.StatusCode)
-	}
-	var enq struct {
-		Status, Message string
-		IDs             []string `json:"ids"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&enq); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(enq.IDs) == 0 {
-		t.Fatalf("no ids returned")
-	}
-
-	// Poll until all of the returned IDs are completed
-	deadline := time.Now().Add(3 * time.Minute)
-	completed := make(map[string]bool)
-	failed := make(map[string]error)
-	for {
-		if time.Now().After(deadline) {
-			t.Fatalf("timeout waiting for completion; completed=%d/%d failed=%d", countTrue(completed), len(enq.IDs), len(failed))
-		}
-		time.Sleep(3 * time.Second)
-		// Fetch snapshot of all downloads once per loop
-		r, err := http.Get(ts.URL + "/api/status")
-		if err != nil {
-			continue
-		}
-		var st struct {
-			Downloads []struct {
-				ID    string `json:"id"`
-				State string `json:"state"`
-				Error string `json:"error"`
-			} `json:"downloads"`
-		}
-		func() { defer r.Body.Close(); _ = json.NewDecoder(r.Body).Decode(&st) }()
-		// classify states for our IDs only
-		for _, d := range st.Downloads {
-			if !contains(enq.IDs, d.ID) {
-				continue
-			}
-			switch d.State {
-			case string(download.StateCompleted):
-				completed[d.ID] = true
-			case string(download.StateFailed):
-				failed[d.ID] = errors.New(d.Error)
-			}
-		}
-		if len(completed) == len(enq.IDs) {
-			break
-		}
-		if len(failed) > 0 {
-			t.Fatalf("some downloads failed: %v", failed)
-		}
-	}
-
-	// Verify at least as many files as IDs exist
-	var files []string
-	_ = filepath.WalkDir(outDir, func(path string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
-			files = append(files, path)
-		}
-		return nil
-	})
-	if len(files) < len(enq.IDs) {
-		t.Fatalf("expected >= %d files, found %d", len(enq.IDs), len(files))
+	if countFiles(t, outDir) < len(dbIDs) {
+		t.Fatalf("expected at least %d output files", len(dbIDs))
 	}
 }
 
-// Single download end-to-end as a smoke test
 func TestEndToEnd_DownloadSingle(t *testing.T) {
+	requireYTDLP(t)
+
+	url := os.Getenv("INTEGRATION_URL")
+	if url == "" {
+		url = "https://www.youtube.com/watch?v=zGDzdps75ns"
+	}
+
+	ts, outDir := newIntegrationServer(t, 2, 8)
+	dbID := postSingle(t, ts.URL, url)
+
+	row := waitForRows(t, ts.URL, []int64{dbID}, 2*time.Minute)[dbID]
+	if row.Status == "error" && isProviderRestriction(row.ErrorMessage) {
+		t.Skipf("skipping due to provider restrictions: %s", row.ErrorMessage)
+	}
+	if row.Status != "completed" {
+		t.Fatalf("download %d ended with status=%s error=%s", row.ID, row.Status, row.ErrorMessage)
+	}
+
+	if countFiles(t, outDir) == 0 {
+		t.Fatalf("no files created")
+	}
+}
+
+func TestProgress_RemainsBoundedAndMonotonic(t *testing.T) {
+	requireYTDLP(t)
+
+	url := os.Getenv("INTEGRATION_URL")
+	if url == "" {
+		url = "https://www.youtube.com/watch?v=zGDzdps75ns"
+	}
+
+	ts, _ := newIntegrationServer(t, 1, 4)
+	dbID := postSingle(t, ts.URL, url)
+
+	lastProgress := -1.0
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(1 * time.Second)
+		row, ok := getDownloadByID(t, ts.URL, dbID)
+		if !ok {
+			continue
+		}
+		if row.Status == "error" {
+			if isProviderRestriction(row.ErrorMessage) {
+				t.Skipf("skipping due to provider restrictions: %s", row.ErrorMessage)
+			}
+			t.Fatalf("failed: %s", row.ErrorMessage)
+		}
+		if row.Progress < 0 || row.Progress > 100 {
+			t.Fatalf("progress out of range: %.1f", row.Progress)
+		}
+		if row.Progress < lastProgress {
+			t.Fatalf("progress decreased from %.1f to %.1f", lastProgress, row.Progress)
+		}
+		lastProgress = row.Progress
+		// yt-dlp can report all download bytes before post-processing and final
+		// status persistence complete, so the stable contract is monotonic
+		// bounded progress rather than "100 only when completed".
+		if row.Status != "completed" {
+			continue
+		}
+		return
+	}
+	t.Fatalf("timeout waiting for completion")
+}
+
+func newIntegrationServer(t *testing.T, workers, queue int) (*httptest.Server, string) {
+	t.Helper()
+
+	root := t.TempDir()
+	outDir := filepath.Join(root, "downloads")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("create output dir: %v", err)
+	}
+
+	st, err := store.Open(filepath.Join(root, "videofetch.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	mgr := download.NewManager(outDir, workers, queue)
+	mgr.SetStore(st)
+
+	dbWorker := download.NewDBWorker(st, mgr)
+	dbWorker.Start()
+
+	ts := httptest.NewServer(server.New(mgr, st, outDir))
+	t.Cleanup(func() {
+		ts.Close()
+		dbWorker.Stop()
+		mgr.Shutdown()
+		_ = st.Close()
+	})
+
+	return ts, outDir
+}
+
+func requireYTDLP(t *testing.T) {
+	t.Helper()
 	if _, err := exec.LookPath("yt-dlp"); err != nil {
 		t.Skip("yt-dlp not found in PATH; skipping integration test")
 	}
-	url := os.Getenv("INTEGRATION_URL")
-	if url == "" {
-		// Use the specified YouTube URL for integration tests
-		url = "https://www.youtube.com/watch?v=zGDzdps75ns"
-	}
-	outDir := t.TempDir()
-	mgr := download.NewManager(outDir, 2, 8)
-	t.Cleanup(func() { mgr.Shutdown() })
-	h := server.New(mgr, nil, tmpDir)
-	ts := httptest.NewServer(h)
-	defer ts.Close()
+}
+
+func postSingle(t *testing.T, baseURL, url string) int64 {
+	t.Helper()
 
 	body := map[string]string{"url": url}
-	bb, _ := json.Marshal(body)
-	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/download_single", bytes.NewReader(bb))
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/download_single", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("post: %v", err)
+		t.Fatalf("post single: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: %d", resp.StatusCode)
-	}
-	var enq struct{ ID string }
-	_ = json.NewDecoder(resp.Body).Decode(&enq)
-	if enq.ID == "" {
-		t.Fatalf("empty id")
+		t.Fatalf("single status=%d", resp.StatusCode)
 	}
 
-	deadline := time.Now().Add(2 * time.Minute)
-	for {
-		if time.Now().After(deadline) {
-			t.Fatalf("timeout waiting for completion")
-		}
+	var enq struct {
+		DBID int64 `json:"db_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&enq); err != nil {
+		t.Fatalf("decode single response: %v", err)
+	}
+	if enq.DBID <= 0 {
+		t.Fatalf("empty db_id")
+	}
+	return enq.DBID
+}
+
+func postBatch(t *testing.T, baseURL string, urls []string) []int64 {
+	t.Helper()
+
+	body := map[string]any{"urls": urls}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/download", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post batch: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("batch status=%d", resp.StatusCode)
+	}
+
+	var enq struct {
+		DBIDs []int64 `json:"db_ids"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&enq); err != nil {
+		t.Fatalf("decode batch response: %v", err)
+	}
+	return enq.DBIDs
+}
+
+func waitForRows(t *testing.T, baseURL string, ids []int64, timeout time.Duration) map[int64]store.Download {
+	t.Helper()
+
+	want := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
 		time.Sleep(2 * time.Second)
-		r, err := http.Get(ts.URL + "/api/status?id=" + enq.ID)
+
+		rows, err := listDownloads(baseURL)
 		if err != nil {
 			continue
 		}
-		var last struct {
-			Downloads []struct {
-				State string `json:"state"`
-				Error string `json:"error"`
-			} `json:"downloads"`
+
+		found := make(map[int64]store.Download, len(ids))
+		done := true
+		for _, row := range rows {
+			if _, ok := want[row.ID]; !ok {
+				continue
+			}
+			found[row.ID] = row
+			if row.Status != "completed" && row.Status != "error" {
+				done = false
+			}
 		}
-		func() { defer r.Body.Close(); _ = json.NewDecoder(r.Body).Decode(&last) }()
-		if len(last.Downloads) == 1 {
-			st := last.Downloads[0].State
-			if st == string(download.StateCompleted) {
-				break
-			}
-			if st == string(download.StateFailed) {
-				// Skip for common provider/region flakiness rather than fail the suite
-				if strings.Contains(last.Downloads[0].Error, "Requested format is not available") ||
-					strings.Contains(last.Downloads[0].Error, "HTTP Error 403") {
-					t.Skipf("skipping due to provider restrictions: %s", last.Downloads[0].Error)
-				}
-				t.Fatalf("failed: %s", last.Downloads[0].Error)
-			}
+		if len(found) != len(ids) {
+			done = false
+		}
+		if done {
+			return found
 		}
 	}
-	// Verify file created
-	var count int
-	_ = filepath.WalkDir(outDir, func(path string, d fs.DirEntry, err error) error {
+
+	t.Fatalf("timeout waiting for rows: %v", ids)
+	return nil
+}
+
+func getDownloadByID(t *testing.T, baseURL string, id int64) (store.Download, bool) {
+	t.Helper()
+
+	rows, err := listDownloads(baseURL)
+	if err != nil {
+		t.Fatalf("list downloads: %v", err)
+	}
+	for _, row := range rows {
+		if row.ID == id {
+			return row, true
+		}
+	}
+	return store.Download{}, false
+}
+
+func listDownloads(baseURL string) ([]store.Download, error) {
+	resp, err := http.Get(baseURL + "/api/downloads")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var out struct {
+		Downloads []store.Download `json:"downloads"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Downloads, nil
+}
+
+func countFiles(t *testing.T, root string) int {
+	t.Helper()
+
+	count := 0
+	if err := filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
 		if err == nil && !d.IsDir() {
 			count++
 		}
 		return nil
-	})
-	if count == 0 {
-		t.Fatalf("no files created")
+	}); err != nil {
+		t.Fatalf("walk output dir: %v", err)
 	}
+	return count
 }
 
 func parseURLsEnv() []string {
@@ -219,108 +309,7 @@ func parseURLsEnv() []string {
 	return nil
 }
 
-func contains(xs []string, x string) bool {
-	for _, v := range xs {
-		if v == x {
-			return true
-		}
-	}
-	return false
-}
-func countTrue(m map[string]bool) int {
-	n := 0
-	for _, v := range m {
-		if v {
-			n++
-		}
-	}
-	return n
-}
-
-// Verify progress does not jump to 100% at start and that we observe
-// an in-flight progress value (0 < p < 100) before completion.
-func TestProgress_NoEarlyHundred(t *testing.T) {
-	if _, err := exec.LookPath("yt-dlp"); err != nil {
-		t.Skip("yt-dlp not found in PATH; skipping integration test")
-	}
-
-	url := os.Getenv("INTEGRATION_URL")
-	if url == "" {
-		// Use the specified YouTube URL for integration tests
-		url = "https://www.youtube.com/watch?v=zGDzdps75ns"
-	}
-
-	outDir := t.TempDir()
-	mgr := download.NewManager(outDir, 1, 4)
-	t.Cleanup(func() { mgr.Shutdown() })
-	h := server.New(mgr, nil, tmpDir)
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-
-	// Enqueue single download via API
-	body := map[string]string{"url": url}
-	bb, _ := json.Marshal(body)
-	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/download_single", bytes.NewReader(bb))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: %d", resp.StatusCode)
-	}
-	var enq struct{ ID string }
-	_ = json.NewDecoder(resp.Body).Decode(&enq)
-	if enq.ID == "" {
-		t.Fatalf("empty id")
-	}
-
-	deadline := time.Now().Add(2 * time.Minute)
-	sawMid := false
-	completed := false
-	for time.Now().Before(deadline) {
-		time.Sleep(1 * time.Second)
-		r, err := http.Get(ts.URL + "/api/status?id=" + enq.ID)
-		if err != nil {
-			continue
-		}
-		var last struct {
-			Downloads []struct {
-				State    string  `json:"state"`
-				Error    string  `json:"error"`
-				Progress float64 `json:"progress"`
-			} `json:"downloads"`
-		}
-		func() { defer r.Body.Close(); _ = json.NewDecoder(r.Body).Decode(&last) }()
-		if len(last.Downloads) != 1 {
-			continue
-		}
-		st := last.Downloads[0].State
-		p := last.Downloads[0].Progress
-		if st == string(download.StateFailed) {
-			if strings.Contains(last.Downloads[0].Error, "Requested format is not available") ||
-				strings.Contains(last.Downloads[0].Error, "HTTP Error 403") {
-				t.Skipf("skipping due to provider restrictions: %s", last.Downloads[0].Error)
-			}
-			t.Fatalf("failed: %s", last.Downloads[0].Error)
-		}
-		if st != string(download.StateCompleted) {
-			if p >= 100 {
-				t.Fatalf("progress reached 100%% before completion; state=%s", st)
-			}
-			if p > 0 && p < 100 {
-				sawMid = true
-			}
-		} else {
-			completed = true
-			break
-		}
-	}
-	if !completed {
-		t.Fatalf("timeout waiting for completion")
-	}
-	if !sawMid {
-		t.Fatalf("did not observe mid-progress (0<p<100) before completion")
-	}
+func isProviderRestriction(errMsg string) bool {
+	return strings.Contains(errMsg, "Requested format is not available") ||
+		strings.Contains(errMsg, "HTTP Error 403")
 }

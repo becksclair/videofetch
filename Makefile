@@ -2,19 +2,22 @@
 
 BIN ?= videofetch
 CMD ?= ./cmd/videofetch
+GO_PACKAGES ?= ./cmd/... ./internal/...
 HOST ?= 0.0.0.0
 PORT ?= 8080
 OUTPUT_DIR ?= $(HOME)/Videos/videofetch
 INSTALL_DIR ?= $(HOME)/.local/bin
 SERVICE_DIR ?= $(HOME)/.config/systemd/user
 
-.PHONY: build test run generate tools install uninstall
+.PHONY: build test integration run generate tools install uninstall
 
 build: generate
 	go build -o $(BIN) $(CMD)
 
 test:
-	go test ./... -race
+	go test $(GO_PACKAGES) -race
+
+integration:
 	go test -tags=integration ./internal/integration -v
 
 run: build
@@ -30,7 +33,7 @@ generate:
 
 # Install codegen tools
 tools:
-	go install github.com/a-h/templ/cmd/templ@latest
+	go install github.com/a-h/templ/cmd/templ@v0.3.977
 
 # Install binary and systemd service
 install: build

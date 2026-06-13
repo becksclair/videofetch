@@ -766,6 +766,20 @@ func TestListDownloads_Sort(t *testing.T) {
 	if downloads[1].ID != secondID {
 		t.Errorf("Expected older updated download %d second, got %d", secondID, downloads[1].ID)
 	}
+
+	downloads, err = store.ListDownloads(ctx, ListFilter{Sort: "progress", Order: "desc"})
+	if err != nil {
+		t.Fatalf("ListDownloads(progress) failed: %v", err)
+	}
+	if len(downloads) != 2 {
+		t.Fatalf("Expected 2 downloads, got %d", len(downloads))
+	}
+	if downloads[0].ID != firstID {
+		t.Errorf("Expected highest-progress download %d first, got %d", firstID, downloads[0].ID)
+	}
+	if downloads[1].ID != secondID {
+		t.Errorf("Expected lowest-progress download %d second, got %d", secondID, downloads[1].ID)
+	}
 }
 
 func TestNormalizeStatus(t *testing.T) {

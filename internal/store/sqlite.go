@@ -467,7 +467,7 @@ WHERE id = ? AND status = 'downloading'`, sqliteTimestampNow(), id)
 // ListDownloads returns downloads filtered and sorted.
 type ListFilter struct {
 	Status string // optional: active|history|pending|downloading|paused|completed|error|canceled
-	Sort   string // created_at|updated_at|title|status
+	Sort   string // created_at|updated_at|title|status|progress
 	Order  string // asc|desc
 	Limit  int    // optional
 	Offset int    // optional
@@ -480,6 +480,8 @@ func (s *Store) ListDownloads(ctx context.Context, f ListFilter) ([]Download, er
 		sortCol = "title"
 	case "status":
 		sortCol = "status"
+	case "progress":
+		sortCol = "progress"
 	case "created_at", "date":
 		sortCol = "created_at"
 	case "updated_at", "updated":

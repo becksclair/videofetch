@@ -913,6 +913,7 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 			// Fallback: in-memory snapshot with basic filter/sort
 			items = mgr.Snapshot("")
 			if status != "" {
+				status = dashboardSnapshotStatus(status)
 				filtered := make([]*download.Item, 0, len(items))
 				for _, it := range items {
 					if string(it.State) == status {
@@ -1116,6 +1117,17 @@ func parseControlRequest(w http.ResponseWriter, r *http.Request) (controlRequest
 		return controlRequest{}, false
 	}
 	return req, true
+}
+
+func dashboardSnapshotStatus(status string) string {
+	switch status {
+	case "pending":
+		return string(download.StateQueued)
+	case "error":
+		return string(download.StateFailed)
+	default:
+		return status
+	}
 }
 
 func parseListFilter(q url.Values) store.ListFilter {
