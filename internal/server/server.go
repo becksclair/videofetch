@@ -1091,7 +1091,7 @@ func New(mgr downloadManager, st *store.Store, outputDir string, opts ...Options
 	})
 
 	// Add minimal logging + recover
-	return recoverer(logger(mux))
+	return recoverer(logger(corsMiddleware(mux)))
 }
 
 // Utilities
@@ -1282,6 +1282,32 @@ func isAllowedWebSocketOrigin(r *http.Request) bool {
 	default:
 		return false
 	}
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin != "" && isAllowedWebSocketOrigin(r) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			allowHeaders := strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers"))
+			if allowHeaders == "" {
+				allowHeaders = "Content-Type"
+			}
+			w.Header().Set("Access-Control-Allow-Headers", allowHeaders)
+			w.Header().Add("Vary", "Origin")
+			w.Header().Add("Vary", "Access-Control-Request-Headers")
+		}
+
+		if r.Method == http.MethodOptions && origin != "" && r.Header.Get("Access-Control-Request-Method") != "" {
+			if isAllowedWebSocketOrigin(r) {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func removeDownloadFile(outputDir, filename string) error {

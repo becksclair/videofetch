@@ -67,6 +67,56 @@ func TestDownloadSingle_Success(t *testing.T) {
 	}
 }
 
+func TestDownloadSingle_AllowsExtensionCORSPreflight(t *testing.T) {
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "abc123", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, nil, "/tmp/test")
+	origin := "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/download_single", nil)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != origin {
+		t.Fatalf("Access-Control-Allow-Origin=%q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, http.MethodPost) || !strings.Contains(got, http.MethodOptions) {
+		t.Fatalf("Access-Control-Allow-Methods=%q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "content-type") {
+		t.Fatalf("Access-Control-Allow-Headers=%q", got)
+	}
+}
+
+func TestDownloadSingle_IncludesCORSHeaderForExtensionPost(t *testing.T) {
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "abc123", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, nil, "/tmp/test")
+	origin := "moz-extension://12345678-1234-1234-1234-123456789abc"
+
+	reqBody := bytes.NewBufferString(`{"url":"https://example.com/video"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/download_single", reqBody)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != origin {
+		t.Fatalf("Access-Control-Allow-Origin=%q", got)
+	}
+}
+
 func TestDownloadSingle_MethodNotAllowed(t *testing.T) {
 	h := New(&mockMgr{enqueueFn: func(url string) (string, error) { return "", nil }, snapshotFn: func(id string) []*download.Item { return nil }}, nil, "/tmp/test")
 	w := doJSON(t, h, http.MethodGet, "/api/download_single", "10.0.0.2", nil)

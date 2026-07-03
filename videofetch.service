@@ -1,12 +1,13 @@
 [Unit]
 Description=VideoFetch Service
 Documentation=https://github.com/becksclair/videofetch
-After=network.target
-Wants=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/videofetch --host 127.0.0.1 --port 8080 --output-dir %h/Videos/videofetch
+ExecStartPre=/usr/sbin/sh -c 'i=0; while [ "$$i" -lt 30 ]; do /usr/sbin/ip -o addr show tailscale0 | /usr/sbin/grep -q "100.120.202.119/" && exit 0; i=$$((i + 1)); /usr/sbin/sleep 1; done; exit 1'
+ExecStart=%h/.local/bin/videofetch --host 100.120.202.119 --port 8080 --output-dir %h/Videos/videofetch
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
