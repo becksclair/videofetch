@@ -30,3 +30,4 @@ static/style.css
 
 # Local agent/tool settings
 .claude/settings.local.json
+.ultra-review-state.json
