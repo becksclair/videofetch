@@ -3,6 +3,7 @@ package download
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -49,15 +50,26 @@ func TestManagerShutdown_CancelsInFlightDownload(t *testing.T) {
 }
 
 type recordingStore struct {
-	updateStatusCalls int
+	mu                  sync.Mutex
+	updateStatusCalls   int
+	updateProgressCalls int
+	statuses            []string
+	progress            []float64
 }
 
 func (s *recordingStore) UpdateProgress(ctx context.Context, id int64, progress float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateProgressCalls++
+	s.progress = append(s.progress, progress)
 	return nil
 }
 
 func (s *recordingStore) UpdateStatus(ctx context.Context, id int64, status, errMsg string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.updateStatusCalls++
+	s.statuses = append(s.statuses, status)
 	return nil
 }
 
@@ -67,6 +79,27 @@ func (s *recordingStore) UpdateFilename(ctx context.Context, id int64, filename 
 
 func (s *recordingStore) UpdateArtifacts(ctx context.Context, id int64, paths []string) error {
 	return nil
+}
+
+func (s *recordingStore) counts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updateStatusCalls, s.updateProgressCalls
+}
+
+func (s *recordingStore) hasCompletedProgress() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, status := range s.statuses {
+		if status == "completed" {
+			for _, progress := range s.progress {
+				if progress == 100 {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func TestUpdateState_PersistsDuringClosing(t *testing.T) {
@@ -86,7 +119,8 @@ func TestUpdateState_PersistsDuringClosing(t *testing.T) {
 	m.closing.Store(true)
 	m.updateState("id-1", StateCompleted, "")
 
-	if st.updateStatusCalls == 0 {
+	statusCalls, _ := st.counts()
+	if statusCalls == 0 {
 		t.Fatalf("expected UpdateStatus to be called while closing")
 	}
 }
@@ -231,6 +265,87 @@ func TestProcessPendingDownload_MetadataRetryEventuallySucceeds(t *testing.T) {
 	}
 	if len(st.updateStatuses) != 0 {
 		t.Fatalf("expected no error status writes on eventual success, got %v", st.updateStatuses)
+	}
+}
+
+func TestProcessPendingDownload_UsesResolverAfterMetadataFailure(t *testing.T) {
+	m := NewManager(t.TempDir(), 1, 4)
+	defer m.Shutdown()
+
+	downloadURLCh := make(chan string, 1)
+	m.workerDownload = func(ctx context.Context, id, url string) error {
+		downloadURLCh <- url
+		return nil
+	}
+
+	st := &claimOnlyStore{claimResult: true}
+
+	origFetch := fetchMediaInfo
+	t.Cleanup(func() { fetchMediaInfo = origFetch })
+	fetchMediaInfo = func(ctx context.Context, inputURL string) (MediaInfo, error) {
+		return MediaInfo{}, ErrNoMediaInfo
+	}
+
+	origResolve := resolveDownloadTarget
+	t.Cleanup(func() { resolveDownloadTarget = origResolve })
+	resolveDownloadTarget = func(ctx context.Context, inputURL string) (string, MediaInfo, error) {
+		return "https://yts.gg/torrent/download/AE0EB3BA28283246224DC74DC807ED0B7B014351", MediaInfo{
+			Title:        "resolved",
+			ThumbnailURL: "https://example.com/thumb.jpg",
+		}, nil
+	}
+
+	err := m.ProcessPendingDownload(context.Background(), 10, "https://www.movihub.net/view.php?vid=ce1b7c117", st)
+	if err != nil {
+		t.Fatalf("expected resolver fallback to succeed, got %v", err)
+	}
+	if st.updateMetaCalls != 1 {
+		t.Fatalf("expected resolved metadata to be persisted once, got %d", st.updateMetaCalls)
+	}
+	select {
+	case gotURL := <-downloadURLCh:
+		if gotURL != "https://yts.gg/torrent/download/AE0EB3BA28283246224DC74DC807ED0B7B014351" {
+			t.Fatalf("unexpected worker URL %q", gotURL)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("worker did not receive resolved URL")
+	}
+}
+
+func TestProcessPendingDownload_AttachesDBBeforeWorkerStarts(t *testing.T) {
+	m := NewManager(t.TempDir(), 1, 4)
+	defer m.Shutdown()
+
+	st := &claimOnlyStore{claimResult: true}
+	progressStore := &recordingStore{}
+	m.SetStore(progressStore)
+	m.workerDownload = func(ctx context.Context, id, url string) error {
+		return nil
+	}
+
+	origFetch := fetchMediaInfo
+	t.Cleanup(func() { fetchMediaInfo = origFetch })
+	fetchMediaInfo = func(ctx context.Context, inputURL string) (MediaInfo, error) {
+		return MediaInfo{Title: "ok"}, nil
+	}
+
+	if err := m.ProcessPendingDownload(context.Background(), 11, "https://example.com/video", st); err != nil {
+		t.Fatalf("expected pending download to enqueue, got %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if progressStore.hasCompletedProgress() {
+			return
+		}
+		select {
+		case <-deadline:
+			statusCalls, progressCalls := progressStore.counts()
+			t.Fatalf("expected completed status and 100 progress persistence, got status calls=%d progress calls=%d", statusCalls, progressCalls)
+		case <-ticker.C:
+		}
 	}
 }
 

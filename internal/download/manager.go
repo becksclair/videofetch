@@ -37,6 +37,7 @@ const (
 )
 
 var fetchMediaInfo = FetchMediaInfo
+var resolveDownloadTarget = ResolveDownloadTarget
 
 // progressData represents the JSON structure from yt-dlp's progress output
 type progressData struct {
@@ -213,6 +214,10 @@ func (m *Manager) Shutdown() {
 
 // Enqueue adds a new URL to the queue and returns the assigned ID.
 func (m *Manager) Enqueue(url string) (string, error) {
+	return m.enqueuePrepared(url, 0, MediaInfo{})
+}
+
+func (m *Manager) enqueuePrepared(url string, dbID int64, mediaInfo MediaInfo) (string, error) {
 	if m.closing.Load() {
 		return "", ErrShuttingDown
 	}
@@ -223,6 +228,19 @@ func (m *Manager) Enqueue(url string) (string, error) {
 	_, err := m.registry.Create(id, url)
 	if err != nil {
 		return "", fmt.Errorf("failed to create item: %w", err)
+	}
+
+	if dbID > 0 {
+		if err := m.registry.Attach(id, dbID); err != nil {
+			m.registry.Delete(id)
+			return "", fmt.Errorf("failed to attach db id: %w", err)
+		}
+	}
+	if mediaInfo.Title != "" || mediaInfo.DurationSec != 0 || mediaInfo.ThumbnailURL != "" {
+		if err := m.registry.SetMeta(id, mediaInfo.Title, mediaInfo.DurationSec, mediaInfo.ThumbnailURL); err != nil {
+			m.registry.Delete(id)
+			return "", fmt.Errorf("failed to set metadata: %w", err)
+		}
 	}
 
 	if m.enqueueJob(job{id: id, url: url, token: m.bumpQueueToken(id)}) {
@@ -922,19 +940,35 @@ func (m *Manager) ProcessPendingDownload(ctx context.Context, dbID int64, url st
 		return nil
 	}
 
+	downloadURL := url
+
 	// Fetch media info with bounded retries for transient extractor/network failures.
 	mediaInfo, err := fetchMediaInfoWithRetry(ctx, url, dbID)
 	if err != nil {
-		logging.LogMetadataFetch(url, dbID, err)
-		// Update database with error
-		if updateErr := store.UpdateStatus(ctx, dbID, "failed", fmt.Sprintf("metadata_fetch_failed: %v", err)); updateErr != nil {
-			slog.Error("failed to update error status in ProcessPendingDownload",
-				"event", "store_update_error",
-				"operation", "update_status_on_metadata_failure",
-				"db_id", dbID,
-				"error", updateErr)
+		resolvedURL, resolvedInfo, resolveErr := resolveDownloadTarget(ctx, url)
+		if resolveErr != nil {
+			logging.LogMetadataFetch(url, dbID, err)
+			// Update database with error
+			if updateErr := store.UpdateStatus(ctx, dbID, "failed", fmt.Sprintf("metadata_fetch_failed: %v", err)); updateErr != nil {
+				slog.Error("failed to update error status in ProcessPendingDownload",
+					"event", "store_update_error",
+					"operation", "update_status_on_metadata_failure",
+					"db_id", dbID,
+					"error", updateErr)
+			}
+			return fmt.Errorf("metadata fetch failed: %w", err)
 		}
-		return fmt.Errorf("metadata fetch failed: %w", err)
+		downloadURL = resolvedURL
+		mediaInfo = resolvedInfo
+		if strings.TrimSpace(mediaInfo.Title) == "" {
+			mediaInfo.Title = url
+		}
+		slog.Info("resolved unsupported download target",
+			"event", "download_target_resolved",
+			"db_id", dbID,
+			"url", logging.RedactURL(url),
+			"target_url", logging.RedactURL(downloadURL),
+			"metadata_error", err)
 	}
 
 	// Update database with metadata
@@ -949,7 +983,7 @@ func (m *Manager) ProcessPendingDownload(ctx context.Context, dbID int64, url st
 	}
 
 	// Enqueue the download with the manager
-	id, err := m.Enqueue(url)
+	id, err := m.enqueuePrepared(downloadURL, dbID, mediaInfo)
 	if err != nil {
 		slog.Error("failed to enqueue download in ProcessPendingDownload",
 			"event", "enqueue_error",
@@ -966,10 +1000,6 @@ func (m *Manager) ProcessPendingDownload(ctx context.Context, dbID int64, url st
 		}
 		return fmt.Errorf("enqueue failed: %w", err)
 	}
-
-	// Attach the database ID to the manager item for progress updates
-	m.AttachDB(id, dbID)
-	m.SetMeta(id, mediaInfo.Title, mediaInfo.DurationSec, mediaInfo.ThumbnailURL)
 
 	slog.Info("ProcessPendingDownload: download enqueued",
 		"event", "download_enqueued",

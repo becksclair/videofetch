@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"videofetch/internal/logging"
@@ -52,6 +53,10 @@ func (d *Downloader) SetArtifactCallback(fn func(id string, paths []string)) {
 // Download executes a yt-dlp download for the given URL.
 // It blocks until the download completes or fails.
 func (d *Downloader) Download(ctx context.Context, id, url string) error {
+	if isTorrentDownloadURL(url) {
+		return d.downloadTorrent(ctx, id, url)
+	}
+
 	// Defensive: ensure yt-dlp exists.
 	if err := CheckYTDLP(); err != nil {
 		return fmt.Errorf("yt_dlp_not_found: %w", err)
@@ -89,6 +94,40 @@ func (d *Downloader) Download(ctx context.Context, id, url string) error {
 	return nil
 }
 
+func (d *Downloader) downloadTorrent(ctx context.Context, id, rawURL string) error {
+	if _, err := exec.LookPath("aria2c"); err != nil {
+		return fmt.Errorf("aria2c_not_found: %w", err)
+	}
+	if err := os.MkdirAll(d.outDir, 0o755); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
+
+	args := []string{
+		"--dir", d.outDir,
+		"--seed-time=0",
+		"--summary-interval=1",
+		"--console-log-level=notice",
+		"--allow-overwrite=false",
+		"--auto-file-renaming=true",
+		rawURL,
+	}
+	cmd := exec.CommandContext(ctx, "aria2c", args...)
+	if err := d.executeAria2(id, cmd); err != nil {
+		return err
+	}
+	if d.onProgress != nil {
+		d.onProgress(id, 100)
+	}
+	return nil
+}
+
+func isTorrentDownloadURL(rawURL string) bool {
+	lower := strings.ToLower(strings.TrimSpace(rawURL))
+	return strings.HasPrefix(lower, "magnet:") ||
+		strings.HasSuffix(lower, ".torrent") ||
+		strings.Contains(lower, "/torrent/download/")
+}
+
 // buildYTDLPArgs constructs the argument list for yt-dlp based on Rust reference
 func buildYTDLPArgs(url, outTpl, outDir, tempDir string, embedThumbnail bool) []string {
 	args := []string{
@@ -117,7 +156,9 @@ func shouldRetryWithoutThumbnail(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "postprocessing: error opening output files")
+	return strings.Contains(msg, "postprocessing: error opening output files") ||
+		strings.Contains(msg, "the extracted extension") ||
+		strings.Contains(msg, "unsafe file extension")
 }
 
 func (d *Downloader) tempDirForID(id string) string {
@@ -220,6 +261,168 @@ func (d *Downloader) executeWithProgressTracking(id string, cmd *exec.Cmd) error
 	}
 
 	return nil
+}
+
+func (d *Downloader) executeAria2(id string, cmd *exec.Cmd) error {
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+
+	state := &aria2ProgressState{}
+	outputTail := newTailBuffer(512)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		d.parseAria2Progress(id, bufio.NewScanner(stderr), state, outputTail)
+	}()
+	go func() {
+		defer wg.Done()
+		d.parseAria2Progress(id, bufio.NewScanner(stdout), state, outputTail)
+	}()
+	wg.Wait()
+
+	waitErr := cmd.Wait()
+	if waitErr != nil {
+		tail := outputTail.String()
+		if tail != "" {
+			return fmt.Errorf("aria2c: %w: %s", waitErr, tail)
+		}
+		return fmt.Errorf("aria2c: %w", waitErr)
+	}
+	if filename := state.Filename(); filename != "" && d.onFilename != nil {
+		d.onFilename(id, filename)
+	}
+	return nil
+}
+
+var (
+	aria2PercentPattern  = regexp.MustCompile(`\((\d+(?:\.\d+)?)%\)`)
+	aria2CompletePattern = regexp.MustCompile(`(?m)Download complete:\s*(.+)$`)
+)
+
+type aria2ProgressState struct {
+	mu       sync.Mutex
+	last     float64
+	filename string
+}
+
+func (s *aria2ProgressState) UpdateProgress(progress float64) (float64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if progress < s.last {
+		return s.last, false
+	}
+	s.last = progress
+	return progress, true
+}
+
+func (s *aria2ProgressState) SetFilename(line string) {
+	match := aria2CompletePattern.FindStringSubmatch(line)
+	if len(match) < 2 {
+		return
+	}
+	filename := filepath.Base(strings.TrimSpace(match[1]))
+	if filename == "" {
+		return
+	}
+	s.mu.Lock()
+	s.filename = filename
+	s.mu.Unlock()
+}
+
+func (s *aria2ProgressState) Filename() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.filename
+}
+
+func (d *Downloader) parseAria2Progress(id string, sc *bufio.Scanner, state *aria2ProgressState, outputTail *tailBuffer) {
+	sc.Buffer(make([]byte, 4096), 256*1024)
+	sc.Split(scanCRorLF)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if outputTail != nil {
+			outputTail.AppendLine(line)
+		}
+		if state != nil {
+			state.SetFilename(line)
+		}
+		match := aria2PercentPattern.FindStringSubmatch(line)
+		if len(match) < 2 {
+			continue
+		}
+		var progress float64
+		if _, err := fmt.Sscanf(match[1], "%f", &progress); err != nil {
+			continue
+		}
+		if progress < 0 {
+			progress = 0
+		}
+		if progress > 100 {
+			progress = 100
+		}
+		if state != nil {
+			var ok bool
+			progress, ok = state.UpdateProgress(progress)
+			if !ok {
+				continue
+			}
+		}
+		if d.onProgress != nil {
+			d.onProgress(id, progress)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		logging.LogProgressScanError(id, err)
+	}
+}
+
+func extractAria2Filename(output string) string {
+	match := aria2CompletePattern.FindStringSubmatch(output)
+	if len(match) < 2 {
+		return ""
+	}
+	return filepath.Base(strings.TrimSpace(match[1]))
+}
+
+type tailBuffer struct {
+	mu    sync.Mutex
+	limit int
+	value string
+}
+
+func newTailBuffer(limit int) *tailBuffer {
+	return &tailBuffer{limit: limit}
+}
+
+func (b *tailBuffer) AppendLine(line string) {
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.value == "" {
+		b.value = line
+	} else {
+		b.value += "\n" + line
+	}
+	b.value = tailString(b.value, b.limit)
+}
+
+func (b *tailBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.TrimSpace(b.value)
 }
 
 // parseProgress parses yt-dlp progress output and calls the progress callback
