@@ -1,4 +1,4 @@
-import { enqueueSingle, fetchDownloads } from '@/lib/api';
+import { enqueueSingle, fetchDownloads, isAuthRequiredError } from '@/lib/api';
 import { loadSettings } from '@/lib/storage';
 import { ext, hasServerPermission, openPrimaryPanel } from '@/lib/webext';
 import type { DownloadRow, DownloadStatus } from '@/types';
@@ -163,6 +163,10 @@ async function enqueueURL(url: string, source: 'context_menu' | 'toolbar' | 'com
       source
     }).catch(() => undefined);
   } catch (error) {
+    if (isAuthRequiredError(error)) {
+      notify('VideoFetch sign-in required', 'Open VideoFetch in a tab to refresh your Cloudflare Access session, then try again.');
+      return;
+    }
     notify('VideoFetch enqueue failed', String(error));
   }
 }

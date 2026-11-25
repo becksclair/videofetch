@@ -1263,47 +1263,141 @@ func validURL(u string) bool {
 	return true
 }
 
-func isAllowedWebSocketOrigin(r *http.Request) bool {
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin == "" {
+func normalizeHostPort(host, scheme string) string {
+	h, port, err := net.SplitHostPort(host)
+	if err != nil {
+		return host
+	}
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		if strings.Contains(h, ":") {
+			return "[" + h + "]"
+		}
+		return h
+	}
+	return host
+}
+
+func isHTTPSRequest(r *http.Request) bool {
+	if r.TLS != nil {
 		return true
 	}
+	proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	return strings.EqualFold(proto, "https")
+}
 
+func parseOriginHeader(r *http.Request) (origin string, present bool, valid bool) {
+	values := r.Header.Values("Origin")
+	if len(values) == 0 {
+		return "", false, true
+	}
+	if len(values) > 1 {
+		return "", true, false
+	}
+	trimmed := strings.TrimSpace(values[0])
+	if trimmed == "" {
+		return "", true, false
+	}
+	return trimmed, true, true
+}
+
+func isAllowedOriginValue(r *http.Request, origin string) bool {
 	parsed, err := url.Parse(origin)
 	if err != nil {
 		return false
 	}
+	if parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	if parsed.Host == "" {
+		return false
+	}
 
-	switch strings.ToLower(parsed.Scheme) {
+	scheme := strings.ToLower(parsed.Scheme)
+	switch scheme {
 	case "chrome-extension", "moz-extension":
-		return parsed.Host != ""
+		return true
 	case "http", "https":
-		return strings.EqualFold(parsed.Host, r.Host)
+		if r.Host == "" {
+			return false
+		}
+		expectedScheme := "http"
+		if isHTTPSRequest(r) {
+			expectedScheme = "https"
+		}
+		if scheme != expectedScheme {
+			return false
+		}
+		if !isAllowedSecFetchSite(r) {
+			return false
+		}
+		return strings.EqualFold(normalizeHostPort(parsed.Host, scheme), normalizeHostPort(r.Host, expectedScheme))
 	default:
 		return false
 	}
 }
 
+func isAllowedSecFetchSite(r *http.Request) bool {
+	sfs := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")))
+	return sfs == "" || sfs == "same-origin" || sfs == "none"
+}
+
+func isStateChangingMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	default:
+		return true
+	}
+}
+
+func isAllowedRequestOrigin(r *http.Request) bool {
+	origin, present, valid := parseOriginHeader(r)
+	if !valid {
+		return false
+	}
+	if present {
+		return isAllowedOriginValue(r, origin)
+	}
+	return isAllowedSecFetchSite(r)
+}
+
+func isAllowedWebSocketOrigin(r *http.Request) bool {
+	return isAllowedRequestOrigin(r)
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := strings.TrimSpace(r.Header.Get("Origin"))
-		if origin != "" && isAllowedWebSocketOrigin(r) {
+		w.Header().Add("Vary", "Origin")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+
+		origin, present, valid := parseOriginHeader(r)
+		originAllowed := present && valid && isAllowedOriginValue(r, origin)
+		if originAllowed {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 			allowHeaders := strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers"))
 			if allowHeaders == "" {
 				allowHeaders = "Content-Type"
 			}
 			w.Header().Set("Access-Control-Allow-Headers", allowHeaders)
-			w.Header().Add("Vary", "Origin")
 			w.Header().Add("Vary", "Access-Control-Request-Headers")
 		}
 
-		if r.Method == http.MethodOptions && origin != "" && r.Header.Get("Access-Control-Request-Method") != "" {
-			if isAllowedWebSocketOrigin(r) {
+		if r.Method == http.MethodOptions && present && r.Header.Get("Access-Control-Request-Method") != "" {
+			if originAllowed {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
+			writeJSON(w, http.StatusForbidden, map[string]any{"status": "error", "message": "forbidden_origin"})
+			return
+		}
+
+		if isStateChangingMethod(r.Method) && !isAllowedRequestOrigin(r) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"status": "error", "message": "forbidden_origin"})
+			return
 		}
 
 		next.ServeHTTP(w, r)

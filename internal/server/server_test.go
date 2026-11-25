@@ -87,11 +87,38 @@ func TestDownloadSingle_AllowsExtensionCORSPreflight(t *testing.T) {
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != origin {
 		t.Fatalf("Access-Control-Allow-Origin=%q", got)
 	}
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("Access-Control-Allow-Credentials=%q", got)
+	}
 	if got := w.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, http.MethodPost) || !strings.Contains(got, http.MethodOptions) {
 		t.Fatalf("Access-Control-Allow-Methods=%q", got)
 	}
 	if got := w.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "content-type") {
 		t.Fatalf("Access-Control-Allow-Headers=%q", got)
+	}
+}
+
+func TestDownloadSingle_RejectsDisallowedCORSPreflight(t *testing.T) {
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "abc123", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, nil, "/tmp/test")
+
+	req := httptest.NewRequest(http.MethodOptions, "https://videofetch.heliasar.com/api/download_single", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("expected empty Access-Control-Allow-Origin, got %q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("expected empty Access-Control-Allow-Credentials, got %q", got)
 	}
 }
 
@@ -105,6 +132,7 @@ func TestDownloadSingle_IncludesCORSHeaderForExtensionPost(t *testing.T) {
 	reqBody := bytes.NewBufferString(`{"url":"https://example.com/video"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/download_single", reqBody)
 	req.Header.Set("Origin", origin)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -114,6 +142,182 @@ func TestDownloadSingle_IncludesCORSHeaderForExtensionPost(t *testing.T) {
 	}
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != origin {
 		t.Fatalf("Access-Control-Allow-Origin=%q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("Access-Control-Allow-Credentials=%q", got)
+	}
+}
+
+func TestMutationCSRFGuard(t *testing.T) {
+	enqueued := 0
+	h := New(&mockMgr{
+		enqueueFn: func(url string) (string, error) {
+			enqueued++
+			return "abc123", nil
+		},
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, nil, "/tmp/test")
+
+	cases := []struct {
+		name           string
+		method         string
+		target         string
+		body           string
+		contentType    string
+		origin         string
+		secFetchSite   string
+		forwardedProto string
+		wantStatus     int
+	}{
+		{
+			name:        "blocks cross-site text/plain JSON POST to API",
+			method:      http.MethodPost,
+			target:      "https://videofetch.heliasar.com/api/download_single",
+			body:        `{"url":"https://example.com/video"}`,
+			contentType: "text/plain",
+			origin:      "https://evil.example",
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "blocks cross-site form POST to dashboard",
+			method:      http.MethodPost,
+			target:      "https://videofetch.heliasar.com/dashboard/enqueue",
+			body:        "url=https://example.com/video",
+			contentType: "application/x-www-form-urlencoded",
+			origin:      "https://evil.example",
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "blocks sibling subdomain POST",
+			method:      http.MethodPost,
+			target:      "https://videofetch.heliasar.com/api/download_single",
+			body:        `{"url":"https://example.com/video"}`,
+			contentType: "application/json",
+			origin:      "https://other.heliasar.com",
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "blocks sandboxed null origin POST",
+			method:      http.MethodPost,
+			target:      "https://videofetch.heliasar.com/dashboard/enqueue",
+			body:        "url=https://example.com/video",
+			contentType: "application/x-www-form-urlencoded",
+			origin:      "null",
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:           "blocks http origin downgrade on forwarded https request",
+			method:         http.MethodPost,
+			target:         "http://videofetch.heliasar.com/api/download_single",
+			body:           `{"url":"https://example.com/video"}`,
+			contentType:    "application/json",
+			origin:         "http://videofetch.heliasar.com",
+			forwardedProto: "https",
+			wantStatus:     http.StatusForbidden,
+		},
+		{
+			name:        "blocks https origin mismatch on direct http listener",
+			method:      http.MethodPost,
+			target:      "http://127.0.0.1:8080/api/download_single",
+			body:        `{"url":"https://example.com/video"}`,
+			contentType: "application/json",
+			origin:      "https://127.0.0.1:8080",
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:         "blocks same-host origin with same-site Sec-Fetch-Site downgrade",
+			method:       http.MethodPost,
+			target:       "http://videofetch.heliasar.com/api/download_single",
+			body:         `{"url":"https://example.com/video"}`,
+			contentType:  "application/json",
+			origin:       "http://videofetch.heliasar.com",
+			secFetchSite: "same-site",
+			wantStatus:   http.StatusForbidden,
+		},
+		{
+			name:         "blocks missing Origin with cross-site Sec-Fetch-Site",
+			method:       http.MethodPost,
+			target:       "https://videofetch.heliasar.com/dashboard/enqueue",
+			body:         "url=https://example.com/video",
+			contentType:  "application/x-www-form-urlencoded",
+			secFetchSite: "cross-site",
+			wantStatus:   http.StatusForbidden,
+		},
+		{
+			name:         "blocks missing Origin with same-site Sec-Fetch-Site",
+			method:       http.MethodPost,
+			target:       "https://videofetch.heliasar.com/dashboard/enqueue",
+			body:         "url=https://example.com/video",
+			contentType:  "application/x-www-form-urlencoded",
+			secFetchSite: "same-site",
+			wantStatus:   http.StatusForbidden,
+		},
+		{
+			name:           "allows same-origin HTTPS form POST behind cloudflared",
+			method:         http.MethodPost,
+			target:         "http://videofetch.heliasar.com/dashboard/enqueue",
+			body:           "url=https://example.com/video",
+			contentType:    "application/x-www-form-urlencoded",
+			origin:         "https://videofetch.heliasar.com",
+			secFetchSite:   "same-origin",
+			forwardedProto: "https",
+			wantStatus:     http.StatusOK,
+		},
+		{
+			name:         "allows moz-extension POST with cross-site Sec-Fetch-Site",
+			method:       http.MethodPost,
+			target:       "https://videofetch.heliasar.com/api/download_single",
+			body:         `{"url":"https://example.com/video"}`,
+			contentType:  "application/json",
+			origin:       "moz-extension://12345678-1234-1234-1234-123456789abc",
+			secFetchSite: "cross-site",
+			wantStatus:   http.StatusOK,
+		},
+		{
+			name:        "allows non-browser CLI POST without Origin or Sec-Fetch-Site",
+			method:      http.MethodPost,
+			target:      "https://videofetch.heliasar.com/api/download_single",
+			body:        `{"url":"https://example.com/video"}`,
+			contentType: "application/json",
+			wantStatus:  http.StatusOK,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := enqueued
+			req := httptest.NewRequest(tc.method, tc.target, bytes.NewBufferString(tc.body))
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.secFetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.secFetchSite)
+			}
+			if tc.forwardedProto != "" {
+				req.Header.Set("X-Forwarded-Proto", tc.forwardedProto)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", w.Code, tc.wantStatus, w.Body.String())
+			}
+			if tc.wantStatus == http.StatusForbidden {
+				if enqueued != before {
+					t.Fatalf("blocked request still reached handler")
+				}
+				var resp map[string]any
+				if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("invalid json error body: %v", err)
+				}
+				if resp["message"] != "forbidden_origin" {
+					t.Fatalf("message=%v want forbidden_origin", resp["message"])
+				}
+			}
+		})
 	}
 }
 
@@ -1795,6 +1999,70 @@ func TestIsAllowedWebSocketOrigin(t *testing.T) {
 	req.Header.Set("Origin", "://bad-origin")
 	if isAllowedWebSocketOrigin(req) {
 		t.Fatalf("expected invalid origin header to be rejected")
+	}
+
+	req.Header.Set("Origin", "null")
+	if isAllowedWebSocketOrigin(req) {
+		t.Fatalf("expected null origin header to be rejected")
+	}
+
+	httpsReq := httptest.NewRequest(http.MethodGet, "http://videofetch.heliasar.com/api/ws/downloads", nil)
+	httpsReq.Header.Set("X-Forwarded-Proto", "https")
+	httpsReq.Header.Set("Origin", "https://videofetch.heliasar.com")
+	if !isAllowedWebSocketOrigin(httpsReq) {
+		t.Fatalf("expected matching HTTPS origin behind proxy to be allowed")
+	}
+
+	httpsReq.Header.Set("Origin", "http://videofetch.heliasar.com")
+	if isAllowedWebSocketOrigin(httpsReq) {
+		t.Fatalf("expected HTTP origin downgrade on HTTPS request to be rejected")
+	}
+
+	httpsReq.Header.Set("Origin", "https://videofetch.heliasar.com:443")
+	if !isAllowedWebSocketOrigin(httpsReq) {
+		t.Fatalf("expected default HTTPS port origin to match")
+	}
+
+	noOriginCrossSite := httptest.NewRequest(http.MethodGet, "https://videofetch.heliasar.com/api/ws/downloads", nil)
+	noOriginCrossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+	if isAllowedWebSocketOrigin(noOriginCrossSite) {
+		t.Fatalf("expected cross-site websocket without Origin to be rejected")
+	}
+
+	multiOrigin := httptest.NewRequest(http.MethodGet, "https://videofetch.heliasar.com/api/ws/downloads", nil)
+	multiOrigin.Header.Add("Origin", "https://videofetch.heliasar.com")
+	multiOrigin.Header.Add("Origin", "https://evil.example")
+	if isAllowedWebSocketOrigin(multiOrigin) {
+		t.Fatalf("expected multiple Origin headers to be rejected")
+	}
+
+	directHTTPWithHTTPSOrigin := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/ws/downloads", nil)
+	directHTTPWithHTTPSOrigin.Header.Set("Origin", "https://127.0.0.1:8080")
+	if isAllowedWebSocketOrigin(directHTTPWithHTTPSOrigin) {
+		t.Fatalf("expected https origin on direct http listener to be rejected")
+	}
+}
+
+func TestSecurityHeadersPreventFramingAndCrossOriginSubresourceLoads(t *testing.T) {
+	h := New(&mockMgr{
+		enqueueFn:  func(url string) (string, error) { return "abc123", nil },
+		snapshotFn: func(id string) []*download.Item { return nil },
+	}, nil, "/tmp/test")
+
+	for _, path := range []string{"/", "/dashboard", "/healthz"} {
+		req := httptest.NewRequest(http.MethodGet, "https://videofetch.heliasar.com"+path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Fatalf("%s X-Frame-Options=%q want DENY", path, got)
+		}
+		if got := w.Header().Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
+			t.Fatalf("%s Content-Security-Policy=%q want frame-ancestors 'none'", path, got)
+		}
+		if got := w.Header().Get("Cross-Origin-Resource-Policy"); got != "same-origin" {
+			t.Fatalf("%s Cross-Origin-Resource-Policy=%q want same-origin", path, got)
+		}
 	}
 }
 

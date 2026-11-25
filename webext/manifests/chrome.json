@@ -2,7 +2,7 @@
 	"manifest_version": 3,
 	"name": "VideoFetch Sidepanel",
 	"description": "Control VideoFetch downloads with realtime progress, pause/resume/cancel, and native play.",
-	"version": "0.1.2",
+	"version": "0.1.4",
 	"icons": {
 		"128": "icons/icon-128.png"
 	},
@@ -44,7 +44,8 @@
 	"host_permissions": [
 		"http://127.0.0.1/*",
 		"http://localhost/*",
-		"http://100.120.202.119/*"
+		"http://100.120.202.119/*",
+		"https://videofetch.heliasar.com/*"
 	],
 	"optional_host_permissions": ["http://*/*", "https://*/*"]
 }

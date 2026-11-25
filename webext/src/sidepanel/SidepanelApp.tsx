@@ -6,6 +6,8 @@ import {
   deleteRecord,
   enqueueSingle,
   fetchDownloads,
+  isAuthRequiredError,
+  normalizeBaseUrl,
   removeRecord,
   wsUrl
 } from '@/lib/api';
@@ -130,6 +132,8 @@ export function SidepanelApp() {
   const [railMessage, setRailMessage] = useState('Initializing VideoFetch link...');
   const [railTone, setRailTone] = useState<RailTone>('warn');
   const [needsServerPermission, setNeedsServerPermission] = useState(false);
+  const [needsAuth, setNeedsAuth] = useState(false);
+  const [retryNonce, setRetryNonce] = useState(0);
   const [downloads, setDownloads] = useState<DownloadRow[]>([]);
   const [enqueueUrl, setEnqueueUrl] = useState('');
   const [enqueueBusy, setEnqueueBusy] = useState(false);
@@ -147,6 +151,8 @@ export function SidepanelApp() {
   const historyOffsetRef = useRef(PAGE_SIZE);
   const wsUpsertSeq = useRef(0);
   const wsUpsertsByID = useRef(new Map<number, { row: DownloadRow; seq: number }>());
+  const needsAuthRef = useRef(false);
+  const enterAuthRequiredRef = useRef<(() => void) | null>(null);
 
   const activeRows = useMemo(
     () => downloads.filter((row) => row.status === 'pending' || row.status === 'downloading' || row.status === 'paused'),
@@ -260,26 +266,79 @@ export function SidepanelApp() {
     };
   }, [syncEnqueueFromActiveTab]);
 
+  const openSignIn = useCallback(() => {
+    if (!settings) return;
+    void ext.tabs.create({ url: normalizeBaseUrl(settings.serverBaseUrl) });
+  }, [settings]);
+
+  const retryConnection = useCallback(() => {
+    needsAuthRef.current = false;
+    setNeedsAuth(false);
+    setRailTone('warn');
+    setRailMessage('Reconnecting to VideoFetch...');
+    setRetryNonce((current) => current + 1);
+  }, []);
+
+  const resumeConnectionIfAuthLatched = useCallback(() => {
+    if (needsAuthRef.current) {
+      retryConnection();
+    }
+  }, [retryConnection]);
+
   useEffect(() => {
     const listener = (message: unknown) => {
       const payload = message as { type?: string; source?: string };
-      if (payload?.type !== 'videofetch.enqueued' || payload.source !== 'command') {
+      if (payload?.type !== 'videofetch.enqueued') {
         return;
       }
-      setRailTone('ok');
-      setRailMessage('Keyboard enqueue accepted for current tab URL.');
+      if (payload.source === 'command') {
+        setRailTone('ok');
+        setRailMessage('Keyboard enqueue accepted for current tab URL.');
+      }
+      resumeConnectionIfAuthLatched();
     };
 
     ext.runtime.onMessage.addListener(listener);
     return () => {
       ext.runtime.onMessage.removeListener(listener);
     };
-  }, []);
+  }, [resumeConnectionIfAuthLatched]);
+
+  useEffect(() => {
+    if (!needsAuth || !settings) return;
+
+    let serverOrigin: string;
+    try {
+      serverOrigin = new URL(settings.serverBaseUrl).origin;
+    } catch {
+      return;
+    }
+
+    const onUpdated: Parameters<typeof ext.tabs.onUpdated.addListener>[0] = (_tabID, changeInfo, tab) => {
+      if (changeInfo.status !== 'complete' || !tab.url) {
+        return;
+      }
+      try {
+        if (new URL(tab.url).origin === serverOrigin) {
+          retryConnection();
+        }
+      } catch {
+        // ignore non-URL tab values
+      }
+    };
+
+    ext.tabs.onUpdated.addListener(onUpdated);
+    return () => {
+      ext.tabs.onUpdated.removeListener(onUpdated);
+    };
+  }, [needsAuth, settings, retryConnection]);
 
   useEffect(() => {
     if (!settings) return;
 
     let closed = false;
+    let authRequired = false;
+    let httpRefreshInFlight = false;
     let socket: WebSocket | null = null;
 
     const stopPolling = () => {
@@ -289,12 +348,37 @@ export function SidepanelApp() {
       }
     };
 
+    const stopReconnect = () => {
+      if (reconnectTimer.current) {
+        window.clearInterval(reconnectTimer.current);
+        reconnectTimer.current = null;
+      }
+    };
+
+    const enterAuthRequired = () => {
+      authRequired = true;
+      stopPolling();
+      stopReconnect();
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+        socket.close();
+      }
+      setMode('poll');
+      needsAuthRef.current = true;
+      setNeedsAuth(true);
+      setRailTone('warn');
+      setRailMessage('Sign-in required for VideoFetch. Open sign-in to refresh your Cloudflare Access session.');
+    };
+    enterAuthRequiredRef.current = enterAuthRequired;
+
     const refreshViaHttp = async (historyLimit = historyOffsetRef.current, resetHistory = false) => {
       const requestID = ++httpRefreshSeq.current;
       const startedAtUpsertSeq = wsUpsertSeq.current;
+      httpRefreshInFlight = true;
       try {
         const rows = await fetchVisibleDownloads(settings.serverBaseUrl, historyLimit);
-        if (closed || requestID !== httpRefreshSeq.current) return;
+        if (closed || authRequired || requestID !== httpRefreshSeq.current) return;
+        needsAuthRef.current = false;
+        setNeedsAuth(false);
         const newerUpserts = Array.from(wsUpsertsByID.current.values())
           .filter((entry) => entry.seq > startedAtUpsertSeq)
           .map((entry) => entry.row);
@@ -303,20 +387,34 @@ export function SidepanelApp() {
           setHistoryOffset(PAGE_SIZE);
         }
       } catch (error) {
-        if (closed || requestID !== httpRefreshSeq.current) return;
+        if (closed || authRequired) return;
+        if (isAuthRequiredError(error)) {
+          enterAuthRequired();
+          return;
+        }
+        if (requestID !== httpRefreshSeq.current) return;
         setRailTone('err');
         setRailMessage(`Polling failed: ${String(error)}`);
+      } finally {
+        if (requestID === httpRefreshSeq.current) {
+          httpRefreshInFlight = false;
+        }
       }
     };
 
     const startPolling = (reason: string) => {
+      if (closed || authRequired) return;
       setMode('poll');
       setRailTone('warn');
       setRailMessage(`${reason}. Polling every second while reconnecting WebSocket...`);
-      void refreshViaHttp();
+      if (!httpRefreshInFlight) {
+        void refreshViaHttp();
+      }
       if (!pollTimer.current) {
         pollTimer.current = window.setInterval(() => {
-          void refreshViaHttp();
+          if (!httpRefreshInFlight) {
+            void refreshViaHttp();
+          }
         }, 1000);
       }
       if (!reconnectTimer.current) {
@@ -329,6 +427,7 @@ export function SidepanelApp() {
     };
 
     const connectSocket = () => {
+      if (closed || authRequired) return;
       try {
         socket = new WebSocket(wsUrl(settings.serverBaseUrl, PAGE_SIZE));
       } catch (error) {
@@ -337,19 +436,18 @@ export function SidepanelApp() {
       }
 
       socket.onopen = () => {
-        if (closed) return;
+        if (closed || authRequired) return;
         setMode('ws');
+        needsAuthRef.current = false;
+        setNeedsAuth(false);
         stopPolling();
         setRailTone('ok');
         setRailMessage('Realtime stream online.');
-        if (reconnectTimer.current) {
-          window.clearInterval(reconnectTimer.current);
-          reconnectTimer.current = null;
-        }
+        stopReconnect();
       };
 
       socket.onmessage = (event) => {
-        if (closed) return;
+        if (closed || authRequired) return;
         const parsed = decodeWsMessage(event.data);
         if (!parsed) return;
         if (parsed.type === 'snapshot') {
@@ -372,12 +470,12 @@ export function SidepanelApp() {
       };
 
       socket.onerror = () => {
-        if (closed) return;
+        if (closed || authRequired) return;
         startPolling('Realtime stream dropped');
       };
 
       socket.onclose = () => {
-        if (closed) return;
+        if (closed || authRequired) return;
         startPolling('WebSocket disconnected');
       };
     };
@@ -386,16 +484,16 @@ export function SidepanelApp() {
 
     return () => {
       closed = true;
+      if (enterAuthRequiredRef.current === enterAuthRequired) {
+        enterAuthRequiredRef.current = null;
+      }
       if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
         socket.close();
       }
-      if (reconnectTimer.current) {
-        window.clearInterval(reconnectTimer.current);
-        reconnectTimer.current = null;
-      }
+      stopReconnect();
       stopPolling();
     };
-  }, [settings]);
+  }, [settings, retryNonce]);
 
   const setBusy = (id: number, action: string | null) => {
     setActionBusy((current) => {
@@ -407,6 +505,21 @@ export function SidepanelApp() {
       }
       return next;
     });
+  };
+
+  const handleActionAuthError = (error: unknown): boolean => {
+    if (!isAuthRequiredError(error)) {
+      return false;
+    }
+    if (enterAuthRequiredRef.current) {
+      enterAuthRequiredRef.current();
+    } else {
+      needsAuthRef.current = true;
+      setNeedsAuth(true);
+      setRailTone('warn');
+      setRailMessage('Sign-in required for VideoFetch. Open sign-in to refresh your Cloudflare Access session.');
+    }
+    return true;
   };
 
   const runAction = async (row: DownloadRow, action: RowAction) => {
@@ -422,11 +535,21 @@ export function SidepanelApp() {
       }
       setRailTone('ok');
       setRailMessage(`${action.toUpperCase()} accepted for #${row.id}.`);
-      const rows = await fetchVisibleDownloads(settings.serverBaseUrl, historyOffset);
-      setDownloads(rows);
+      resumeConnectionIfAuthLatched();
+      try {
+        const rows = await fetchVisibleDownloads(settings.serverBaseUrl, historyOffset);
+        setDownloads(rows);
+      } catch (refreshError) {
+        if (!handleActionAuthError(refreshError)) {
+          setRailTone('warn');
+          setRailMessage(`${action.toUpperCase()} accepted for #${row.id}, but refresh failed: ${String(refreshError)}`);
+        }
+      }
     } catch (error) {
-      setRailTone('err');
-      setRailMessage(`${action.toUpperCase()} failed: ${String(error)}`);
+      if (!handleActionAuthError(error)) {
+        setRailTone('err');
+        setRailMessage(`${action.toUpperCase()} failed: ${String(error)}`);
+      }
     } finally {
       setBusy(row.id, null);
     }
@@ -468,9 +591,12 @@ export function SidepanelApp() {
       await syncEnqueueFromActiveTab();
       setRailTone('ok');
       setRailMessage('URL accepted and routed to VideoFetch.');
+      resumeConnectionIfAuthLatched();
     } catch (error) {
-      setRailTone('err');
-      setRailMessage(`Enqueue failed: ${String(error)}`);
+      if (!handleActionAuthError(error)) {
+        setRailTone('err');
+        setRailMessage(`Enqueue failed: ${String(error)}`);
+      }
     } finally {
       setEnqueueBusy(false);
     }
@@ -487,13 +613,23 @@ export function SidepanelApp() {
     setClearHistoryBusy(true);
     try {
       const cleared = await clearHistory(settings.serverBaseUrl);
-      const rows = await fetchVisibleDownloads(settings.serverBaseUrl, historyOffset);
-      setDownloads(rows);
       setRailTone('ok');
       setRailMessage(`Cleared ${cleared} recent history ${cleared === 1 ? 'row' : 'rows'}.`);
+      resumeConnectionIfAuthLatched();
+      try {
+        const rows = await fetchVisibleDownloads(settings.serverBaseUrl, historyOffset);
+        setDownloads(rows);
+      } catch (refreshError) {
+        if (!handleActionAuthError(refreshError)) {
+          setRailTone('warn');
+          setRailMessage(`Cleared ${cleared} recent history ${cleared === 1 ? 'row' : 'rows'}, but refresh failed: ${String(refreshError)}`);
+        }
+      }
     } catch (error) {
-      setRailTone('err');
-      setRailMessage(`Clear history failed: ${String(error)}`);
+      if (!handleActionAuthError(error)) {
+        setRailTone('err');
+        setRailMessage(`Clear history failed: ${String(error)}`);
+      }
     } finally {
       setClearHistoryBusy(false);
     }
@@ -558,9 +694,12 @@ export function SidepanelApp() {
         [...current, ...more].forEach((row) => byId.set(row.id, row));
         return sortRows(Array.from(byId.values()));
       });
+      resumeConnectionIfAuthLatched();
     } catch (error) {
-      setRailTone('err');
-      setRailMessage(`History fetch failed: ${String(error)}`);
+      if (!handleActionAuthError(error)) {
+        setRailTone('err');
+        setRailMessage(`History fetch failed: ${String(error)}`);
+      }
     } finally {
       setHistoryLoading(false);
     }
@@ -573,7 +712,7 @@ export function SidepanelApp() {
           <div className="mb-2 flex items-center justify-between gap-3">
             <h1 className="text-[11px] font-bold tracking-[0.22em] text-emerald-200">VIDEOFETCH CONTROL RAIL</h1>
             <div className="rounded border border-emerald-400/40 bg-black/40 px-2 py-1 text-[10px] tracking-[0.18em] text-emerald-100">
-              {mode === 'ws' ? 'REALTIME WS' : 'DEGRADED POLL'}
+              {needsAuth ? 'AUTH REQUIRED' : mode === 'ws' ? 'REALTIME WS' : 'DEGRADED POLL'}
             </div>
           </div>
 
@@ -587,6 +726,24 @@ export function SidepanelApp() {
               >
                 OPEN SETTINGS
               </button>
+            ) : null}
+            {needsAuth && settings ? (
+              <div className="mt-2 flex gap-2">
+                <button
+                  className="rounded border border-amber-300/45 bg-amber-400/15 px-2 py-1 text-[10px] font-semibold tracking-[0.08em] text-amber-100 hover:bg-amber-400/25"
+                  onClick={openSignIn}
+                  type="button"
+                >
+                  OPEN SIGN-IN
+                </button>
+                <button
+                  className="rounded border border-slate-500/50 bg-slate-500/20 px-2 py-1 text-[10px] font-semibold tracking-[0.08em] text-slate-100 hover:bg-slate-500/30"
+                  onClick={retryConnection}
+                  type="button"
+                >
+                  RETRY
+                </button>
+              </div>
             ) : null}
           </div>
         </div>

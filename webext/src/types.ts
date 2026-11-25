@@ -32,6 +32,6 @@ export interface ExtensionSettings {
 }
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
-  serverBaseUrl: 'http://100.120.202.119:8080',
+  serverBaseUrl: 'https://videofetch.heliasar.com',
   notificationsEnabled: true
 };

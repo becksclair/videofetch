@@ -1,12 +1,13 @@
 {
 	"name": "videofetch-webext",
 	"private": true,
-	"version": "0.1.2",
+	"version": "0.1.4",
 	"type": "module",
 	"scripts": {
 		"dev": "vite",
 		"build": "bun run build:chrome",
 		"typecheck": "tsc --noEmit",
+		"test": "bun test",
 		"build:chrome": "bun run typecheck && VIDEOFETCH_WEBEXT_TARGET=chrome vite build",
 		"build:firefox": "bun run typecheck && VIDEOFETCH_WEBEXT_TARGET=firefox vite build",
 		"lint:firefox": "bun run build:firefox && addons-linter --enable-data-collection-permissions --disable-linter-rules=no-unsanitized/property dist/firefox",

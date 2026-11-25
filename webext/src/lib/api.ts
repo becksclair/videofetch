@@ -1,5 +1,16 @@
 import type { DownloadRow, DownloadsResponse } from '@/types';
 
+export class AuthRequiredError extends Error {
+  constructor(message = 'Sign-in required to access VideoFetch.') {
+    super(message);
+    this.name = 'AuthRequiredError';
+  }
+}
+
+export function isAuthRequiredError(error: unknown): error is AuthRequiredError {
+  return error instanceof AuthRequiredError;
+}
+
 export function normalizeBaseUrl(input: string): string {
   return input.replace(/\/+$/, '');
 }
@@ -8,19 +19,80 @@ function endpoint(baseUrl: string, path: string): string {
   return `${normalizeBaseUrl(baseUrl)}${path}`;
 }
 
+function isAuthChallengeResponse(response: Response): boolean {
+  if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+    return true;
+  }
+  const wwwAuth = response.headers.get('www-authenticate')?.toLowerCase() ?? '';
+  if (wwwAuth.includes('cloudflare-access')) {
+    return true;
+  }
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  if ((response.status === 401 || response.status === 403) && !contentType.includes('application/json')) {
+    return true;
+  }
+  return false;
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
   const response = await fetch(url, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers || {})
-    }
+    credentials: 'include',
+    redirect: 'manual',
+    headers
   });
+
+  if (isAuthChallengeResponse(response)) {
+    throw new AuthRequiredError();
+  }
+
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  if (!contentType.includes('application/json')) {
+    if (response.ok && contentType.includes('text/html')) {
+      throw new AuthRequiredError();
+    }
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    throw new Error(`Unexpected response (${response.status})`);
+  }
+
   const payload = (await response.json()) as T & { message?: string; status?: string };
   if (!response.ok) {
     throw new Error(payload.message || `Request failed (${response.status})`);
   }
   return payload;
+}
+
+export async function checkHealth(baseUrl: string): Promise<string> {
+  const response = await fetch(endpoint(baseUrl, '/healthz'), {
+    credentials: 'include',
+    redirect: 'manual'
+  });
+
+  if (isAuthChallengeResponse(response)) {
+    throw new AuthRequiredError();
+  }
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  if (contentType.includes('text/html')) {
+    throw new AuthRequiredError();
+  }
+
+  const body = (await response.text()).trim();
+  if (body !== 'ok') {
+    throw new Error(`Unexpected health response: ${body || '(empty)'}`);
+  }
+  return body;
 }
 
 export async function fetchDownloads(

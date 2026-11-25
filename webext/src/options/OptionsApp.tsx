@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { normalizeBaseUrl } from '@/lib/api';
+import { checkHealth, isAuthRequiredError, normalizeBaseUrl } from '@/lib/api';
 import { loadSettings, saveSettings } from '@/lib/storage';
 import { ext, originPermissionForBaseUrl } from '@/lib/webext';
 import { DEFAULT_SETTINGS } from '@/types';
@@ -20,6 +20,7 @@ export function OptionsApp() {
   const [serverBaseUrl, setServerBaseUrl] = useState(DEFAULT_SETTINGS.serverBaseUrl);
   const [notificationsEnabled, setNotificationsEnabled] = useState(DEFAULT_SETTINGS.notificationsEnabled);
   const [status, setStatus] = useState('');
+  const [needsAuth, setNeedsAuth] = useState(false);
 
   useEffect(() => {
     loadSettings()
@@ -32,7 +33,16 @@ export function OptionsApp() {
       });
   }, []);
 
+  const openSignIn = () => {
+    const normalized = normalizeBaseUrl(serverBaseUrl.trim());
+    if (!normalized) {
+      return;
+    }
+    void ext.tabs.create({ url: normalized });
+  };
+
   const onSave = async () => {
+    setNeedsAuth(false);
     try {
       const normalized = normalizeBaseUrl(serverBaseUrl.trim());
       await ensureServerPermission(normalized);
@@ -48,15 +58,17 @@ export function OptionsApp() {
 
   const testConnection = async () => {
     const normalized = normalizeBaseUrl(serverBaseUrl.trim());
+    setNeedsAuth(false);
     try {
       await ensureServerPermission(normalized);
-      const response = await fetch(`${normalized}/healthz`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      const body = await response.text();
-      setStatus(`Health check passed: ${body.trim()}`);
+      const body = await checkHealth(normalized);
+      setStatus(`Health check passed: ${body}`);
     } catch (error) {
+      if (isAuthRequiredError(error)) {
+        setNeedsAuth(true);
+        setStatus('Sign-in required (Cloudflare Access). Open the server URL to authenticate, then test again.');
+        return;
+      }
       setStatus(`Health check failed: ${String(error)}`);
     }
   };
@@ -70,8 +82,11 @@ export function OptionsApp() {
         <input
           className="mb-4 w-full rounded border border-slate-600 bg-black/45 px-3 py-2 outline-none focus:border-emerald-400"
           value={serverBaseUrl}
-          onChange={(event) => setServerBaseUrl(event.target.value)}
-          placeholder="http://127.0.0.1:8080"
+          onChange={(event) => {
+            setServerBaseUrl(event.target.value);
+            setNeedsAuth(false);
+          }}
+          placeholder="https://videofetch.heliasar.com"
         />
 
         <label className="mb-5 flex items-center gap-2 text-[12px] text-slate-200">
@@ -101,7 +116,18 @@ export function OptionsApp() {
         </div>
 
         {status ? (
-          <div className="mt-4 rounded border border-slate-700 bg-black/45 px-3 py-2 text-[11px] text-slate-200">{status}</div>
+          <div className="mt-4 rounded border border-slate-700 bg-black/45 px-3 py-2 text-[11px] text-slate-200">
+            <div>{status}</div>
+            {needsAuth ? (
+              <button
+                className="mt-2 rounded border border-amber-300/45 bg-amber-400/15 px-2.5 py-1 text-[10px] font-semibold tracking-[0.08em] text-amber-100 hover:bg-amber-400/25"
+                onClick={openSignIn}
+                type="button"
+              >
+                OPEN SIGN-IN
+              </button>
+            ) : null}
+          </div>
         ) : null}
       </section>
     </main>
