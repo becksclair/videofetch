@@ -8,19 +8,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"videofetch/internal/logging"
+)
+
+const (
+	infoJSONFilename = "info.json"
+	infoJSONMaxAge   = 5 * time.Minute
 )
 
 // Downloader executes yt-dlp downloads with progress tracking.
 // It encapsulates all yt-dlp subprocess management and output parsing.
 type Downloader struct {
-	outDir string
+	outDir              string
+	concurrentFragments int
 
 	// Callbacks for progress and filename updates
 	onProgress  func(id string, progress float64)
@@ -31,8 +39,17 @@ type Downloader struct {
 // NewDownloader creates a new Downloader with the specified output directory and callbacks.
 func NewDownloader(outputDir string) *Downloader {
 	return &Downloader{
-		outDir: outputDir,
+		outDir:              outputDir,
+		concurrentFragments: 4,
 	}
+}
+
+// SetConcurrentFragments sets how many fragments yt-dlp downloads in parallel.
+func (d *Downloader) SetConcurrentFragments(n int) {
+	if n < 1 {
+		n = 1
+	}
+	d.concurrentFragments = n
 }
 
 // SetProgressCallback sets the callback for progress updates.
@@ -48,6 +65,31 @@ func (d *Downloader) SetFilenameCallback(fn func(id string, filename string)) {
 // SetArtifactCallback sets the callback for tracked artifact paths observed in yt-dlp logs.
 func (d *Downloader) SetArtifactCallback(fn func(id string, paths []string)) {
 	d.onArtifacts = fn
+}
+
+// SaveInfoJSON persists raw yt-dlp -j metadata into the download's temp dir so Download can reuse it via --load-info-json.
+func (d *Downloader) SaveInfoJSON(id string, raw []byte) error {
+	if id == "" || len(raw) == 0 {
+		return nil
+	}
+	tempDir := d.tempDirForID(id)
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(tempDir, infoJSONFilename), raw, 0o600)
+}
+
+func freshInfoJSONPath(tempDir string) string {
+	p := filepath.Join(tempDir, infoJSONFilename)
+	st, err := os.Stat(p)
+	if err != nil {
+		return ""
+	}
+	if st.IsDir() || st.Size() == 0 || time.Since(st.ModTime()) > infoJSONMaxAge {
+		_ = os.Remove(p)
+		return ""
+	}
+	return p
 }
 
 // Download executes a yt-dlp download for the given URL.
@@ -70,23 +112,42 @@ func (d *Downloader) Download(ctx context.Context, id, url string) error {
 
 	logging.LogYTDLPCommand(id, url, outTpl, false)
 
-	args := buildYTDLPArgs(url, outTpl, d.outDir, tempDir, true)
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	runAttempt := func(infoJSONPath string, embedThumbnail bool) error {
+		args := buildYTDLPArgsWithInfo(url, infoJSONPath, outTpl, d.outDir, tempDir, embedThumbnail, d.concurrentFragments)
+		cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+		configureSubprocess(cmd)
+		return d.executeWithProgressTracking(id, cmd)
+	}
 
-	if err := d.executeWithProgressTracking(id, cmd); err != nil {
-		if ctx.Err() != nil || !shouldRetryWithoutThumbnail(err) {
-			return err
-		}
-		_ = os.RemoveAll(tempDir)
+	retryWithoutThumb := func() error {
+		cleanupThumbnailFiles(tempDir)
 		if mkErr := os.MkdirAll(tempDir, 0o755); mkErr != nil {
-			return fmt.Errorf("recreate temp dir for thumbnail fallback: %w", mkErr)
+			return fmt.Errorf("ensure temp dir for thumbnail fallback: %w", mkErr)
 		}
+		return runAttempt("", false)
+	}
 
-		retryArgs := buildYTDLPArgs(url, outTpl, d.outDir, tempDir, false)
-		retryCmd := exec.CommandContext(ctx, "yt-dlp", retryArgs...)
-		if retryErr := d.executeWithProgressTracking(id, retryCmd); retryErr != nil {
-			return retryErr
+	infoPath := freshInfoJSONPath(tempDir)
+	err := runAttempt(infoPath, true)
+	if err != nil && ctx.Err() == nil && infoPath != "" {
+		slog.Warn("cached info.json download failed; falling back to URL extraction",
+			"event", "ytdlp_infojson_fallback",
+			"download_id", id,
+			"error", err)
+		_ = os.Remove(infoPath)
+		if shouldRetryWithoutThumbnail(err) {
+			err = retryWithoutThumb()
+		} else {
+			err = runAttempt("", true)
+			if err != nil && ctx.Err() == nil && shouldRetryWithoutThumbnail(err) {
+				err = retryWithoutThumb()
+			}
 		}
+	} else if err != nil && ctx.Err() == nil && shouldRetryWithoutThumbnail(err) {
+		err = retryWithoutThumb()
+	}
+	if err != nil {
+		return err
 	}
 	_ = os.RemoveAll(tempDir)
 
@@ -112,6 +173,7 @@ func (d *Downloader) downloadTorrent(ctx context.Context, id, rawURL string) err
 		rawURL,
 	}
 	cmd := exec.CommandContext(ctx, "aria2c", args...)
+	configureSubprocess(cmd)
 	if err := d.executeAria2(id, cmd); err != nil {
 		return err
 	}
@@ -129,18 +191,30 @@ func isTorrentDownloadURL(rawURL string) bool {
 }
 
 // buildYTDLPArgs constructs the argument list for yt-dlp based on Rust reference
-func buildYTDLPArgs(url, outTpl, outDir, tempDir string, embedThumbnail bool) []string {
-	args := []string{
-		url,
+func buildYTDLPArgs(url, outTpl, outDir, tempDir string, embedThumbnail bool, concurrentFragments int) []string {
+	return buildYTDLPArgsWithInfo(url, "", outTpl, outDir, tempDir, embedThumbnail, concurrentFragments)
+}
+
+func buildYTDLPArgsWithInfo(url, infoJSONPath, outTpl, outDir, tempDir string, embedThumbnail bool, concurrentFragments int) []string {
+	var args []string
+	if infoJSONPath != "" {
+		args = append(args, "--load-info-json", infoJSONPath)
+	} else {
+		args = append(args, "--no-playlist", url)
+	}
+	args = append(args,
 		"--progress-template", "download:%(progress)j",
 		"--newline",
 		"--continue",
 		"--paths", outDir,
-		"--paths", "temp:" + tempDir,
+		"--paths", "temp:"+tempDir,
 		"--output", outTpl,
+	)
+	if concurrentFragments > 1 {
+		args = append(args, "--concurrent-fragments", fmt.Sprintf("%d", concurrentFragments))
 	}
 	if embedThumbnail {
-		args = append(args, "--embed-thumbnail")
+		args = append(args, "--embed-thumbnail", "--convert-thumbnails", "jpg")
 	}
 	args = append(args,
 		// "--embed-subs",
@@ -149,6 +223,22 @@ func buildYTDLPArgs(url, outTpl, outDir, tempDir string, embedThumbnail bool) []
 		"--windows-filenames",
 	)
 	return args
+}
+
+func cleanupThumbnailFiles(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(entry.Name())) {
+		case ".jpg", ".jpeg", ".png", ".webp", ".avif":
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
 }
 
 func shouldRetryWithoutThumbnail(err error) bool {
@@ -451,7 +541,7 @@ func (d *Downloader) parseProgress(id string, sc *bufio.Scanner) {
 			continue
 		}
 
-		// Calculate percentage from bytes
+		// Calculate percentage from bytes, falling back to HLS fragment counts
 		downloaded := progress.DownloadedBytes
 		total := progress.TotalBytes
 
@@ -460,9 +550,20 @@ func (d *Downloader) parseProgress(id string, sc *bufio.Scanner) {
 			total = progress.TotalBytesEstimate
 		}
 
-		// Calculate and update progress percentage
+		var (
+			p           float64
+			hasProgress bool
+		)
 		if total > 0 && downloaded >= 0 {
-			p := downloaded / total * 100.0
+			p = downloaded / total * 100.0
+			hasProgress = true
+		} else if progress.FragmentCount > 0 && progress.FragmentIndex >= 0 {
+			p = float64(progress.FragmentIndex) / float64(progress.FragmentCount) * 100.0
+			hasProgress = true
+		}
+
+		// Calculate and update progress percentage
+		if hasProgress {
 			// Cap percentage to [0,100]
 			if p > 100 {
 				p = 100

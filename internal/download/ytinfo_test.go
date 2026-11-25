@@ -3,6 +3,7 @@ package download
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -211,6 +212,38 @@ func TestFetchMediaInfo_CanceledContext(t *testing.T) {
 	}
 }
 
+func TestParseMediaInfoStream_LargeJSONExceeding1MB(t *testing.T) {
+	// Simulate a multi-megabyte yt-dlp -j line (e.g. YouTube with automatic captions)
+	// that previously failed with "bufio.Scanner: token too long" above 1 MiB.
+	padding := strings.Repeat("x", 2*1024*1024)
+	payload := "WARNING: some extractor warning\n" +
+		`{"title":"Large YouTube Short","duration":42.5,"automatic_captions":"` + padding + `","thumbnails":[{"url":"https://i.ytimg.com/vi/abc/default.jpg"},{"url":"https://i.ytimg.com/vi/abc/maxresdefault.jpg"}]}`
+
+	info, err := parseMediaInfoStream(strings.NewReader(payload), "https://www.youtube.com/shorts/abc")
+	if err != nil {
+		t.Fatalf("expected large JSON payload to parse, got error: %v", err)
+	}
+	if info.Title != "Large YouTube Short" {
+		t.Fatalf("title=%q want %q", info.Title, "Large YouTube Short")
+	}
+	if info.DurationSec != 42 {
+		t.Fatalf("duration=%d want 42", info.DurationSec)
+	}
+	if info.ThumbnailURL != "https://i.ytimg.com/vi/abc/maxresdefault.jpg" {
+		t.Fatalf("thumbnail=%q want maxresdefault", info.ThumbnailURL)
+	}
+	if len(info.RawInfoJSON) < 2*1024*1024 {
+		t.Fatalf("expected RawInfoJSON to preserve full payload, got %d bytes", len(info.RawInfoJSON))
+	}
+}
+
+func TestParseMediaInfoStream_NoJSONReturnsErrNoMediaInfo(t *testing.T) {
+	_, err := parseMediaInfoStream(strings.NewReader("WARNING: only text\n"), "https://example.com/v")
+	if !errors.Is(err, ErrNoMediaInfo) {
+		t.Fatalf("expected ErrNoMediaInfo, got %v", err)
+	}
+}
+
 // Helper functions
 
 func repeatString(s string, count int) string {
@@ -245,4 +278,27 @@ func containsString(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestParseMediaInfoStream_PlaylistEntryNotCachedForReuse(t *testing.T) {
+	single := `{"id":"a","title":"Single","playlist_id":null,"playlist_index":null}`
+	info, err := parseMediaInfoStream(strings.NewReader(single+"\n"), "https://example.com/v")
+	if err != nil {
+		t.Fatalf("single: %v", err)
+	}
+	if string(info.RawInfoJSON) != single {
+		t.Fatalf("single video RawInfoJSON=%q want %q", info.RawInfoJSON, single)
+	}
+
+	entry := `{"id":"a","title":"First","playlist_id":"PL123","playlist_index":1}`
+	info, err = parseMediaInfoStream(strings.NewReader(entry+"\n"), "https://example.com/playlist")
+	if err != nil {
+		t.Fatalf("playlist entry: %v", err)
+	}
+	if info.Title != "First" {
+		t.Fatalf("title=%q want First", info.Title)
+	}
+	if len(info.RawInfoJSON) != 0 {
+		t.Fatalf("playlist entry must not be cached for --load-info-json, got %q", info.RawInfoJSON)
+	}
 }

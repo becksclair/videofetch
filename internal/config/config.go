@@ -23,8 +23,9 @@ type Config struct {
 	AbsDBPath    string // resolved/absolute path
 
 	// Download behavior
-	Workers  int // concurrent workers
-	QueueCap int // max pending jobs
+	Workers             int // concurrent workers
+	QueueCap            int // max pending jobs
+	ConcurrentFragments int // concurrent fragments per yt-dlp download
 
 	// Logging
 	LogLevel          string // debug|info|warn|error
@@ -38,13 +39,14 @@ type Config struct {
 // New creates a Config with default values
 func New() *Config {
 	return &Config{
-		Host:      "0.0.0.0",
-		Port:      8080,
-		Workers:   4,
-		QueueCap:  128,
-		LogLevel:  "info",
-		StartTime: time.Now(),
-		Version:   "1.0.0", // TODO: could be set from build flags
+		Host:                "0.0.0.0",
+		Port:                8080,
+		Workers:             4,
+		QueueCap:            128,
+		ConcurrentFragments: 4,
+		LogLevel:            "info",
+		StartTime:           time.Now(),
+		Version:             "1.0.0", // TODO: could be set from build flags
 	}
 }
 
@@ -66,6 +68,11 @@ func (c *Config) Validate() error {
 	// Validate queue capacity
 	if c.QueueCap < 1 {
 		c.QueueCap = 128
+	}
+
+	// Validate concurrent fragments
+	if c.ConcurrentFragments < 1 {
+		c.ConcurrentFragments = 1
 	}
 
 	// Validate log level
@@ -174,6 +181,7 @@ func (c *Config) String() string {
   Download:
     Workers: %d
     QueueCap: %d
+    ConcurrentFragments: %d
   Logging:
     LogLevel: %s
     UnsafeLogPayloads: %t
@@ -183,7 +191,7 @@ func (c *Config) String() string {
 }`, c.Host, c.Port, c.Addr,
 		c.OutputDir, c.AbsOutputDir,
 		c.DBPath, c.AbsDBPath,
-		c.Workers, c.QueueCap,
+		c.Workers, c.QueueCap, c.ConcurrentFragments,
 		c.LogLevel, c.UnsafeLogPayloads,
 		c.Version, c.StartTime.Format(time.RFC3339))
 }
@@ -191,14 +199,15 @@ func (c *Config) String() string {
 // Summary returns a one-line summary of key configuration
 func (c *Config) Summary() map[string]any {
 	return map[string]any{
-		"addr":                c.Addr,
-		"output_dir":          c.AbsOutputDir,
-		"db_path":             c.AbsDBPath,
-		"workers":             c.Workers,
-		"queue":               c.QueueCap,
-		"log_level":           c.LogLevel,
-		"unsafe_log_payloads": c.UnsafeLogPayloads,
-		"version":             c.Version,
+		"addr":                 c.Addr,
+		"output_dir":           c.AbsOutputDir,
+		"db_path":              c.AbsDBPath,
+		"workers":              c.Workers,
+		"queue":                c.QueueCap,
+		"concurrent_fragments": c.ConcurrentFragments,
+		"log_level":            c.LogLevel,
+		"unsafe_log_payloads":  c.UnsafeLogPayloads,
+		"version":              c.Version,
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -256,7 +257,11 @@ func (s *Store) UpdateProgress(ctx context.Context, id int64, progress float64) 
 	if err != nil {
 		return err
 	}
-	logging.LogDBUpdate("update_progress", id, map[string]any{"progress": progress})
+	slog.Debug("database updated",
+		"event", "db_update",
+		"operation", "update_progress",
+		"id", id,
+		"progress", progress)
 	s.emitChange(ChangeEvent{Type: ChangeUpsert, ID: id})
 	return nil
 }

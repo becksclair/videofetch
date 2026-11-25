@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Test that only JSON download lines affect the percentage, and
@@ -125,5 +126,49 @@ func TestParseProgress_SkipsInvalidJSON(t *testing.T) {
 	got := registry.Get("b").Progress
 	if got != 100.0 {
 		t.Fatalf("expected progress 100.0, got %.1f", got)
+	}
+}
+
+func TestParseProgress_FallsBackToFragmentCounts(t *testing.T) {
+	registry := NewItemRegistry(10)
+	registry.Create("hls", "u")
+
+	downloader := NewDownloader(t.TempDir())
+	downloader.SetProgressCallback(func(id string, progress float64) {
+		registry.SetProgress(id, progress)
+	})
+
+	lines := []string{
+		`{"status": "downloading", "downloaded_bytes": 1024, "total_bytes": 0, "total_bytes_estimate": 0, "fragment_index": 5, "fragment_count": 20}`,
+	}
+	sc := bufio.NewScanner(strings.NewReader(strings.Join(lines, "\n")))
+	downloader.parseProgress("hls", sc)
+
+	got := registry.Get("hls").Progress
+	if got != 25.0 {
+		t.Fatalf("expected progress 25.0 from fragment counts, got %.1f", got)
+	}
+}
+
+func TestShouldPersistProgress_FinerSubPercentThrottled(t *testing.T) {
+	m := &Manager{
+		progressPersistByID: make(map[string]progressPersistState),
+	}
+	base := time.Date(2026, 11, 25, 7, 0, 0, 0, time.UTC)
+
+	if m.shouldPersistProgress("dl1", 0, 0.05, base) {
+		t.Fatalf("expected tiny sub-0.1%% update not to persist")
+	}
+	if !m.shouldPersistProgress("dl1", 0.05, 0.2, base) {
+		t.Fatalf("expected first >=0.1%% progress update to persist")
+	}
+	if m.shouldPersistProgress("dl1", 0.2, 0.4, base.Add(200*time.Millisecond)) {
+		t.Fatalf("expected sub-percent update within 500ms interval to be throttled")
+	}
+	if !m.shouldPersistProgress("dl1", 0.4, 0.5, base.Add(600*time.Millisecond)) {
+		t.Fatalf("expected sub-percent update after 500ms and >=0.1%% delta to persist")
+	}
+	if !m.shouldPersistProgress("dl1", 0.5, 1.0, base.Add(650*time.Millisecond)) {
+		t.Fatalf("expected integer percent crossing to persist immediately")
 	}
 }

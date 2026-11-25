@@ -9,17 +9,45 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestBuildYTDLPArgs_EmbedThumbnailToggle(t *testing.T) {
-	withThumbnail := buildYTDLPArgs("https://example.com", "%(title)s", "/tmp/out", "/tmp/tmp", true)
-	withoutThumbnail := buildYTDLPArgs("https://example.com", "%(title)s", "/tmp/out", "/tmp/tmp", false)
+	withThumbnail := buildYTDLPArgs("https://example.com", "%(title)s", "/tmp/out", "/tmp/tmp", true, 4)
+	withoutThumbnail := buildYTDLPArgs("https://example.com", "%(title)s", "/tmp/out", "/tmp/tmp", false, 1)
 
-	if !containsArg(withThumbnail, "--embed-thumbnail") {
-		t.Fatalf("expected args to include --embed-thumbnail when enabled")
+	if !containsArg(withThumbnail, "--embed-thumbnail") || !containsArg(withThumbnail, "--convert-thumbnails") {
+		t.Fatalf("expected args to include --embed-thumbnail and --convert-thumbnails when enabled: %v", withThumbnail)
 	}
-	if containsArg(withoutThumbnail, "--embed-thumbnail") {
-		t.Fatalf("expected args to omit --embed-thumbnail when disabled")
+	if !containsArg(withThumbnail, "--concurrent-fragments") {
+		t.Fatalf("expected args to include --concurrent-fragments when > 1: %v", withThumbnail)
+	}
+	if containsArg(withoutThumbnail, "--embed-thumbnail") || containsArg(withoutThumbnail, "--convert-thumbnails") {
+		t.Fatalf("expected args to omit thumbnail flags when disabled: %v", withoutThumbnail)
+	}
+	if containsArg(withoutThumbnail, "--concurrent-fragments") {
+		t.Fatalf("expected args to omit --concurrent-fragments when <= 1: %v", withoutThumbnail)
+	}
+}
+
+func TestCleanupThumbnailFiles_PreservesMedia(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "video.mp4.part")
+	thumbAvif := filepath.Join(dir, "video.avif")
+	thumbWebp := filepath.Join(dir, "video.webp")
+	for _, p := range []string{media, thumbAvif, thumbWebp} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", p, err)
+		}
+	}
+	cleanupThumbnailFiles(dir)
+	if _, err := os.Stat(media); err != nil {
+		t.Fatalf("expected media file to be preserved, got err=%v", err)
+	}
+	for _, p := range []string{thumbAvif, thumbWebp} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("expected thumbnail %s to be removed, err=%v", p, err)
+		}
 	}
 }
 
@@ -44,6 +72,99 @@ func TestDownload_RetriesWithoutThumbnailOnKnownPostprocessError(t *testing.T) {
 
 func TestDownload_RetriesWithoutThumbnailOnUnsafeExtensionError(t *testing.T) {
 	assertDownloadRetriesWithoutThumbnail(t, "ERROR: The extracted extension ('v1668790536') is unusual and will be skipped for safety reasons. Confirm you are on the latest version using yt-dlp -U")
+}
+
+func TestDownload_UsesCachedInfoJSONAndFallsBackOnFailure(t *testing.T) {
+	outDir := t.TempDir()
+	fakeBin := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("MkdirAll(fakeBin) failed: %v", err)
+	}
+	logPath := filepath.Join(t.TempDir(), "yt-dlp-infojson.log")
+	fakePath := filepath.Join(fakeBin, "yt-dlp")
+	fakeScript := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  echo "supports --progress-template"
+  exit 0
+fi
+printf '%s\n' "$*" >> "${YTDLP_TEST_LOG}"
+if [[ "${YTDLP_FAIL_INFOJSON:-0}" == "1" && "$*" == *"--load-info-json"* ]]; then
+  echo "ERROR: HTTP Error 403: Forbidden" >&2
+  exit 1
+fi
+echo "[download] Destination: ok.mp4" >&2
+exit 0
+`
+	if err := os.WriteFile(fakePath, []byte(fakeScript), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake yt-dlp) failed: %v", err)
+	}
+
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+origPath)
+	t.Setenv("YTDLP_TEST_LOG", logPath)
+
+	// 1. Fresh info.json fast path: single invocation with --load-info-json
+	d := NewDownloader(outDir)
+	if err := d.SaveInfoJSON("fresh-id", []byte(`{"id":"abc","title":"Fast"}`)); err != nil {
+		t.Fatalf("SaveInfoJSON: %v", err)
+	}
+	if err := d.Download(context.Background(), "fresh-id", "https://example.com/video"); err != nil {
+		t.Fatalf("Download(fresh-id) failed: %v", err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(logPath): %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "--load-info-json") || strings.Contains(lines[0], "https://example.com/video") {
+		t.Fatalf("expected single --load-info-json invocation, got %q", string(raw))
+	}
+
+	// 2. Fallback when --load-info-json fails: retries fresh with URL
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatalf("truncate log: %v", err)
+	}
+	t.Setenv("YTDLP_FAIL_INFOJSON", "1")
+	if err := d.SaveInfoJSON("fallback-id", []byte(`{"id":"abc","title":"Expired"}`)); err != nil {
+		t.Fatalf("SaveInfoJSON: %v", err)
+	}
+	if err := d.Download(context.Background(), "fallback-id", "https://example.com/video"); err != nil {
+		t.Fatalf("Download(fallback-id) failed: %v", err)
+	}
+	raw, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(logPath): %v", err)
+	}
+	lines = strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "--load-info-json") || !strings.Contains(lines[1], "https://example.com/video") || strings.Contains(lines[1], "--load-info-json") {
+		t.Fatalf("expected --load-info-json then URL fallback, got %q", string(raw))
+	}
+
+	// 3. Stale info.json (>5m old) is ignored and deleted
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatalf("truncate log: %v", err)
+	}
+	t.Setenv("YTDLP_FAIL_INFOJSON", "0")
+	if err := d.SaveInfoJSON("stale-id", []byte(`{"id":"abc","title":"Stale"}`)); err != nil {
+		t.Fatalf("SaveInfoJSON: %v", err)
+	}
+	staleFile := filepath.Join(d.tempDirForID("stale-id"), infoJSONFilename)
+	oldTime := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(staleFile, oldTime, oldTime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	if err := d.Download(context.Background(), "stale-id", "https://example.com/video"); err != nil {
+		t.Fatalf("Download(stale-id) failed: %v", err)
+	}
+	raw, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(logPath): %v", err)
+	}
+	lines = strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 1 || strings.Contains(lines[0], "--load-info-json") || !strings.Contains(lines[0], "https://example.com/video") {
+		t.Fatalf("expected stale info.json to be skipped in favor of URL, got %q", string(raw))
+	}
 }
 
 func TestDownload_TorrentUsesAria2(t *testing.T) {

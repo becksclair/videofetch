@@ -2,19 +2,37 @@ package download
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os/exec"
 	"strings"
 )
+
+const maxMediaInfoBytes = 64 * 1024 * 1024 // 64 MiB
+
+type ytInfoJSON struct {
+	Title      string  `json:"title"`
+	Duration   float64 `json:"duration"`
+	Thumbnail  string  `json:"thumbnail"`
+	Thumbnails []struct {
+		URL string `json:"url"`
+	} `json:"thumbnails"`
+	// Set when the input URL expanded to a playlist; decoded loosely so type drift never breaks parsing.
+	PlaylistID    any `json:"playlist_id"`
+	PlaylistIndex any `json:"playlist_index"`
+}
 
 // MediaInfo contains minimal metadata extracted from yt-dlp -j.
 type MediaInfo struct {
 	Title        string
 	DurationSec  int64
 	ThumbnailURL string
+	RawInfoJSON  []byte
 }
 
 // FetchMediaInfo runs `yt-dlp -j` and returns the first parsed media info.
@@ -36,6 +54,7 @@ func FetchMediaInfo(ctx context.Context, inputURL string) (MediaInfo, error) {
 	// Mirror the Rust example: use -j and pass extractor args to impersonate
 	// the generic extractor when probing metadata to improve robustness.
 	cmd := exec.CommandContext(ctx, "yt-dlp", "-j", "--extractor-args", "generic:impersonate", "--no-playlist", inputURL)
+	configureSubprocess(cmd)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return MediaInfo{}, err
@@ -43,63 +62,74 @@ func FetchMediaInfo(ctx context.Context, inputURL string) (MediaInfo, error) {
 	if err := cmd.Start(); err != nil {
 		return MediaInfo{}, err
 	}
-	defer cmd.Wait()
-	sc := bufio.NewScanner(out)
-	// Set a larger buffer size to handle large JSON responses from yt-dlp
-	buf := make([]byte, 64*1024) // 64KB initial buffer
-	sc.Buffer(buf, 1024*1024)    // 1MB max buffer
-	for sc.Scan() {
-		ln := strings.TrimSpace(sc.Text())
-		if ln == "" {
-			continue
+	info, parseErr := parseMediaInfoStream(out, inputURL)
+	if parseErr != nil {
+		_ = killSubprocessGroup(cmd)
+	} else {
+		_, _ = io.Copy(io.Discard, out)
+	}
+	_ = cmd.Wait()
+	if parseErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return MediaInfo{}, ctxErr
 		}
-		// Parse generically to allow missing fields.
-		var m map[string]any
-		if err := json.Unmarshal([]byte(ln), &m); err != nil {
-			continue
+		return MediaInfo{}, parseErr
+	}
+	return info, nil
+}
+
+func parseMediaInfoStream(r io.Reader, inputURL string) (MediaInfo, error) {
+	limited := io.LimitReader(r, maxMediaInfoBytes+1)
+	br := bufio.NewReaderSize(limited, 64*1024)
+	var totalRead int64
+	for {
+		line, err := br.ReadBytes('\n')
+		totalRead += int64(len(line))
+		if totalRead > maxMediaInfoBytes {
+			return MediaInfo{}, fmt.Errorf("metadata response exceeded %d bytes", maxMediaInfoBytes)
 		}
-		var title string
-		if v, ok := m["title"].(string); ok && v != "" {
-			title = v
-		} else {
-			title = inputURL
-		}
-		var duration int64
-		switch dv := m["duration"].(type) {
-		case float64:
-			duration = int64(dv)
-		case int64:
-			duration = dv
-		}
-		var thumb string
-		if v, ok := m["thumbnail"].(string); ok {
-			thumb = v
-		}
-		if thumb == "" {
-			// Try to find the best thumbnail from thumbnails array
-			if arr, ok := m["thumbnails"].([]any); ok && len(arr) > 0 {
-				// Look for high-quality thumbnails first (maxresdefault, hqdefault, etc.)
-				for _, item := range arr {
-					if obj, ok := item.(map[string]any); ok {
-						if u, ok := obj["url"].(string); ok {
-							// Prefer higher resolution thumbnails
-							if strings.Contains(u, "maxresdefault") || strings.Contains(u, "hqdefault") {
-								thumb = u
-								break
-							}
-							// Fallback to any thumbnail if we haven't found one yet
-							if thumb == "" {
-								thumb = u
-							}
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) > 0 && trimmed[0] == '{' {
+			var parsed ytInfoJSON
+			if jsonErr := json.Unmarshal(trimmed, &parsed); jsonErr == nil {
+				title := parsed.Title
+				if title == "" {
+					title = inputURL
+				}
+				thumb := parsed.Thumbnail
+				if thumb == "" {
+					for _, item := range parsed.Thumbnails {
+						if item.URL == "" {
+							continue
+						}
+						if strings.Contains(item.URL, "maxresdefault") || strings.Contains(item.URL, "hqdefault") {
+							thumb = item.URL
+							break
+						}
+						if thumb == "" {
+							thumb = item.URL
 						}
 					}
 				}
+				info := MediaInfo{
+					Title:        title,
+					DurationSec:  int64(parsed.Duration),
+					ThumbnailURL: thumb,
+				}
+				// A playlist entry's info would make --load-info-json download only that entry,
+				// while the URL downloads the whole playlist; only cache single-video metadata.
+				if parsed.PlaylistID == nil && parsed.PlaylistIndex == nil {
+					info.RawInfoJSON = append([]byte(nil), trimmed...)
+				}
+				return info, nil
 			}
 		}
-		return MediaInfo{Title: title, DurationSec: duration, ThumbnailURL: thumb}, nil
-	}
-	if err := sc.Err(); err != nil {
-		return MediaInfo{}, err
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return MediaInfo{}, err
+		}
 	}
 	return MediaInfo{}, ErrNoMediaInfo
 }

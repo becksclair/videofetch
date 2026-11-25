@@ -29,6 +29,7 @@ func main() {
 	flag.StringVar(&cfg.Host, "host", cfg.Host, "Host address to bind")
 	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "Number of concurrent download workers")
 	flag.IntVar(&cfg.QueueCap, "queue", cfg.QueueCap, "Download queue capacity")
+	flag.IntVar(&cfg.ConcurrentFragments, "concurrent-fragments", cfg.ConcurrentFragments, "Number of concurrent fragments per yt-dlp download")
 	flag.StringVar(&cfg.DBPath, "db", "", "Path to SQLite database (default: OS cache dir: videofetch/videofetch.db)")
 	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: debug, info, warn, error")
 	flag.BoolVar(&cfg.UnsafeLogPayloads, "unsafe-log-payloads", cfg.UnsafeLogPayloads, "Enable unsafe raw API payload logging (may leak secrets)")
@@ -81,6 +82,7 @@ func main() {
 
 	// Create download manager with config
 	mgr := download.NewManager(cfg.AbsOutputDir, cfg.Workers, cfg.QueueCap)
+	mgr.SetConcurrentFragments(cfg.ConcurrentFragments)
 	mgr.SetStore(st)
 	defer mgr.Shutdown()
 

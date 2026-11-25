@@ -113,7 +113,20 @@ type Manager struct {
 
 	artifactPersistMu   sync.Mutex
 	artifactPersistByID map[string]*sync.Mutex
+
+	progressPersistMu   sync.Mutex
+	progressPersistByID map[string]progressPersistState
 }
+
+type progressPersistState struct {
+	progress float64
+	at       time.Time
+}
+
+const (
+	progressPersistMinDelta    = 0.1
+	progressPersistMinInterval = 500 * time.Millisecond
+)
 
 type activeDownload struct {
 	id     string
@@ -154,6 +167,7 @@ func NewManager(outputDir string, workers, queueCap int) *Manager {
 		stopIntents:         make(map[string]State, queueCap),
 		artifacts:           make(map[string]map[string]struct{}, queueCap),
 		artifactPersistByID: make(map[string]*sync.Mutex, queueCap),
+		progressPersistByID: make(map[string]progressPersistState, queueCap),
 	}
 	m.runCtx, m.runCancel = context.WithCancel(context.Background())
 
@@ -173,6 +187,13 @@ func NewManager(outputDir string, workers, queueCap int) *Manager {
 // SetStore configures the store for persisting progress and state updates
 func (m *Manager) SetStore(store Store) {
 	m.store = store
+}
+
+// SetConcurrentFragments configures how many fragments yt-dlp fetches concurrently per download.
+func (m *Manager) SetConcurrentFragments(n int) {
+	if m.downloader != nil {
+		m.downloader.SetConcurrentFragments(n)
+	}
 }
 
 // SetRegistry allows replacing the registry (useful for testing)
@@ -243,10 +264,22 @@ func (m *Manager) enqueuePrepared(url string, dbID int64, mediaInfo MediaInfo) (
 		}
 	}
 
+	savedInfoJSON := false
+	if len(mediaInfo.RawInfoJSON) > 0 && !isTorrentDownloadURL(url) && m.downloader != nil && m.workerDownload == nil {
+		if err := m.downloader.SaveInfoJSON(id, mediaInfo.RawInfoJSON); err != nil {
+			slog.Debug("failed to save cached info.json; will extract on download", "id", id, "error", err)
+		} else {
+			savedInfoJSON = true
+		}
+	}
+
 	if m.enqueueJob(job{id: id, url: url, token: m.bumpQueueToken(id)}) {
 		return id, nil
 	}
 	// queue full, remove the entry we just added
+	if savedInfoJSON {
+		_ = m.downloader.CleanupArtifacts(id, "", nil)
+	}
 	m.registry.Delete(id)
 	return "", ErrQueueFull
 }
@@ -360,22 +393,58 @@ func (m *Manager) updateProgress(id string, p float64) {
 		return
 	}
 
-	// Log when integer percentage advances to reduce noise
-	if int(new) != int(prev) {
-		item := m.registry.Get(id)
-		if item != nil {
-			dbIDStr := ""
-			if item.DBID > 0 {
-				dbIDStr = fmt.Sprintf("%d", item.DBID)
-			}
-			logging.LogDownloadProgress(id, dbIDStr, new, item.URL)
-
-			// Update store if configured
-			if item.DBID > 0 && m.store != nil {
-				m.persistProgressToStore(item.DBID, new)
-			}
-		}
+	integerChanged := int(new) != int(prev)
+	shouldPersist := m.shouldPersistProgress(id, prev, new, time.Now())
+	if !integerChanged && !shouldPersist {
+		return
 	}
+
+	item := m.registry.Get(id)
+	if item == nil {
+		return
+	}
+
+	// Log when integer percentage advances to reduce noise
+	if integerChanged {
+		dbIDStr := ""
+		if item.DBID > 0 {
+			dbIDStr = fmt.Sprintf("%d", item.DBID)
+		}
+		logging.LogDownloadProgress(id, dbIDStr, new, item.URL)
+	}
+
+	// Update store if configured (supports finer 0.1% UI updates without log spam)
+	if shouldPersist && item.DBID > 0 && m.store != nil {
+		m.persistProgressToStore(item.DBID, new)
+	}
+}
+
+func (m *Manager) shouldPersistProgress(id string, prev, next float64, now time.Time) bool {
+	m.progressPersistMu.Lock()
+	defer m.progressPersistMu.Unlock()
+
+	if m.progressPersistByID == nil {
+		m.progressPersistByID = make(map[string]progressPersistState)
+	}
+
+	if int(next) != int(prev) || next >= 100 {
+		m.progressPersistByID[id] = progressPersistState{progress: next, at: now}
+		return true
+	}
+
+	last, ok := m.progressPersistByID[id]
+	if !ok {
+		if next >= progressPersistMinDelta {
+			m.progressPersistByID[id] = progressPersistState{progress: next, at: now}
+			return true
+		}
+		return false
+	}
+	if next-last.progress >= progressPersistMinDelta && now.Sub(last.at) >= progressPersistMinInterval {
+		m.progressPersistByID[id] = progressPersistState{progress: next, at: now}
+		return true
+	}
+	return false
 }
 
 func (m *Manager) updateState(id string, st State, errMsg string) {
@@ -836,6 +905,10 @@ func (m *Manager) clearArtifacts(id string) {
 	m.artifactPersistMu.Lock()
 	delete(m.artifactPersistByID, id)
 	m.artifactPersistMu.Unlock()
+
+	m.progressPersistMu.Lock()
+	delete(m.progressPersistByID, id)
+	m.progressPersistMu.Unlock()
 }
 
 func (m *Manager) persistAndClearArtifacts(id string) {
